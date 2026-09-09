@@ -41,8 +41,6 @@ spec:
       labels:
         app: finmate-backend
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull
       containers:
         - name: backend
           image: __BACKEND_IMAGE__
@@ -119,8 +117,6 @@ spec:
       labels:
         app: finmate
     spec:
-      imagePullSecrets:
-        - name: ghcr-pull
       containers:
         - name: frontend
           image: __FRONTEND_IMAGE__

@@ -15,16 +15,9 @@ sudo k3s kubectl create secret generic finmate-secrets \
   --dry-run=client -o yaml | sudo k3s kubectl apply -f -
 ```
 
-For private GHCR images, create a classic GitHub token with `read:packages`, then run:
-
-```bash
-sudo k3s kubectl create secret docker-registry ghcr-pull \
-  --namespace finmate \
-  --docker-server=ghcr.io \
-  --docker-username='YOUR_GITHUB_USERNAME' \
-  --docker-password='YOUR_READ_PACKAGES_TOKEN' \
-  --dry-run=client -o yaml | sudo k3s kubectl apply -f -
-```
+The repository and its linked GHCR images are public, so K3s pulls the images anonymously.
+If the repository becomes private later, add an `imagePullSecret` backed by a token with
+`read:packages` instead of embedding registry credentials in this manifest.
 
 The SSH user used by GitHub Actions must be allowed to run `sudo -n k3s kubectl ...`.
 Use a dedicated deploy key and a narrowly scoped sudoers rule rather than a login password.

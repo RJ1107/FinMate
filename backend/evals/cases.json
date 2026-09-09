@@ -1,0 +1,22 @@
+[
+  {"id":"MKT-001","question":"今天大盘怎么样？","expected_intent":"market_summary","answer_contains":"上涨 3298 家"},
+  {"id":"MKT-002","question":"市场情绪如何？","expected_intent":"market_summary","answer_contains":"情绪分数"},
+  {"id":"MKT-003","question":"给我一个当前行情概览","expected_intent":"market_summary","answer_contains":"成交额"},
+  {"id":"MKT-004","question":"今天上涨多还是下跌多？","expected_intent":"market_summary","answer_contains":"下跌 1834 家"},
+  {"id":"MKT-005","question":"今天成交额多少？","expected_intent":"market_summary","answer_contains":"1286.4 亿元"},
+  {"id":"MKT-006","question":"最强板块是哪个？","expected_intent":"market_summary","answer_contains":"人工智能"},
+  {"id":"MKT-007","question":"今天涨停和跌停有多少？","expected_intent":"market_summary","answer_contains":"涨停 67 家，跌停 12 家"},
+  {"id":"MKT-008","question":"现在市场偏强还是偏弱？","expected_intent":"market_summary","answer_contains":"偏强"},
+  {"id":"STK-001","question":"宁德时代表现如何？","expected_intent":"stock_snapshot","expected_entity":"宁德时代 (300750)","answer_contains":"251.30 元"},
+  {"id":"STK-002","question":"300750 今天涨了多少？","expected_intent":"stock_snapshot","expected_entity":"宁德时代 (300750)","answer_contains":"-1.12%"},
+  {"id":"STK-003","question":"中芯国际今天表现怎么样？","expected_intent":"stock_snapshot","expected_entity":"中芯国际 (688981)","answer_contains":"+4.72%"},
+  {"id":"STK-004","question":"688981 的成交额是多少？","expected_intent":"stock_snapshot","expected_entity":"中芯国际 (688981)","answer_contains":"4.21 亿元"},
+  {"id":"STK-005","question":"比亚迪相对板块强吗？","expected_intent":"stock_snapshot","expected_entity":"比亚迪 (002594)","answer_contains":"弱于新能源板块"},
+  {"id":"STK-006","question":"贵州茅台现在多少钱？","expected_intent":"stock_snapshot","expected_entity":"贵州茅台 (600519)","answer_contains":"1486.00 元"},
+  {"id":"STK-007","question":"招商银行在板块里的表现","expected_intent":"stock_snapshot","expected_entity":"招商银行 (600036)","answer_contains":"银行板块"},
+  {"id":"STK-008","question":"药明康德的快照","expected_intent":"stock_snapshot","expected_entity":"药明康德 (603259)","answer_contains":"+2.18%"},
+  {"id":"STK-009","question":"看看中际旭创","expected_intent":"stock_snapshot","expected_entity":"中际旭创 (300308)","answer_contains":"+5.46%"},
+  {"id":"OOS-001","question":"帮我预测下个月的股价","expected_intent":"unknown","answer_contains":"当前基线"},
+  {"id":"OOS-002","question":"给我推荐三只可以买的股票","expected_intent":"unknown","answer_contains":"当前基线"},
+  {"id":"OOS-003","question":"我应该满仓吗？","expected_intent":"unknown","answer_contains":"当前基线"}
+]

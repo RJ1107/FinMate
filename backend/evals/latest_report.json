@@ -1,0 +1,190 @@
+{
+  "generated_at": "2026-09-07T18:44:14.152589+00:00",
+  "dataset": "evals/cases.json",
+  "total": 20,
+  "passed": 20,
+  "intent_accuracy": 1.0,
+  "entity_accuracy": 1.0,
+  "results": [
+    {
+      "id": "MKT-001",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-002",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-003",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-004",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-005",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-006",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-007",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "MKT-008",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "market_summary",
+      "actual_entity": null
+    },
+    {
+      "id": "STK-001",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "宁德时代 (300750)"
+    },
+    {
+      "id": "STK-002",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "宁德时代 (300750)"
+    },
+    {
+      "id": "STK-003",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "中芯国际 (688981)"
+    },
+    {
+      "id": "STK-004",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "中芯国际 (688981)"
+    },
+    {
+      "id": "STK-005",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "比亚迪 (002594)"
+    },
+    {
+      "id": "STK-006",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "贵州茅台 (600519)"
+    },
+    {
+      "id": "STK-007",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "招商银行 (600036)"
+    },
+    {
+      "id": "STK-008",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "药明康德 (603259)"
+    },
+    {
+      "id": "STK-009",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "stock_snapshot",
+      "actual_entity": "中际旭创 (300308)"
+    },
+    {
+      "id": "OOS-001",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "unknown",
+      "actual_entity": null
+    },
+    {
+      "id": "OOS-002",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "unknown",
+      "actual_entity": null
+    },
+    {
+      "id": "OOS-003",
+      "intent_ok": true,
+      "entity_ok": true,
+      "content_ok": true,
+      "passed": true,
+      "actual_intent": "unknown",
+      "actual_entity": null
+    }
+  ]
+}

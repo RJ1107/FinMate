@@ -1,0 +1,103 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: finmate-production
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://heyfinmate.com
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Define image names
+        id: images
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          repo="${repo,,}"
+          echo "backend=ghcr.io/${owner}/${repo}-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=ghcr.io/${owner}/${repo}-frontend" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ steps.images.outputs.backend }}:${{ steps.images.outputs.tag }}
+            ${{ steps.images.outputs.backend }}:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ${{ steps.images.outputs.frontend }}:${{ steps.images.outputs.tag }}
+            ${{ steps.images.outputs.frontend }}:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Render Kubernetes manifest
+        shell: bash
+        env:
+          BACKEND_IMAGE: ${{ steps.images.outputs.backend }}:${{ steps.images.outputs.tag }}
+          FRONTEND_IMAGE: ${{ steps.images.outputs.frontend }}:${{ steps.images.outputs.tag }}
+        run: |
+          sed \
+            -e "s|__BACKEND_IMAGE__|${BACKEND_IMAGE}|g" \
+            -e "s|__FRONTEND_IMAGE__|${FRONTEND_IMAGE}|g" \
+            deploy/k8s/finmate.yaml > finmate.rendered.yaml
+
+      - name: Deploy to K3s
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          scp finmate.rendered.yaml "${SSH_USER}@${SSH_HOST}:/tmp/finmate-${GITHUB_SHA}.yaml"
+          ssh "${SSH_USER}@${SSH_HOST}" \
+            "sudo -n k3s kubectl apply -f /tmp/finmate-${GITHUB_SHA}.yaml && \
+             sudo -n k3s kubectl rollout status deployment/finmate-backend -n finmate --timeout=180s && \
+             sudo -n k3s kubectl rollout status deployment/finmate -n finmate --timeout=180s && \
+             rm -f /tmp/finmate-${GITHUB_SHA}.yaml"
+
+      - name: Production smoke test
+        shell: bash
+        run: |
+          curl --fail --show-error --silent --retry 6 --retry-delay 5 \
+            https://heyfinmate.com/api/v1/health/ready

@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: production
+      MARKET_PROVIDER: ${MARKET_PROVIDER:-auto}
+      MARKET_CACHE_TTL_SECONDS: ${MARKET_CACHE_TTL_SECONDS:-60}
+      CORS_ORIGINS: http://localhost:8080
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-qwen/qwen3.5-flash-02-23}
+      OPENROUTER_FALLBACK_MODEL: ${OPENROUTER_FALLBACK_MODEL:-deepseek/deepseek-v3.2}
+      OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-http://localhost:8080}
+      OPENROUTER_APP_TITLE: ${OPENROUTER_APP_TITLE:-FinMate}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped

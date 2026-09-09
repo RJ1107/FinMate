@@ -118,7 +118,9 @@ spec:
         app: finmate
     spec:
       containers:
-        - name: frontend
+        # Keep the bootstrap Deployment's container name so the first apply replaces
+        # nginx instead of merging a second port-80 container into the same Pod.
+        - name: nginx
           image: __FRONTEND_IMAGE__
           imagePullPolicy: Always
           env:

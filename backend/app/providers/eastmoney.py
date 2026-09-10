@@ -41,6 +41,7 @@ SINA_COUNT_URL = (
 )
 SINA_SW_SECTOR_URL = "https://vip.stock.finance.sina.com.cn/q/view/SwHy.php"
 EASTMONEY_NEWS_SEARCH_URL = "https://search-api-web.eastmoney.com/search/jsonp"
+EASTMONEY_FAST_NEWS_URL = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
 EASTMONEY_LIMIT_UP_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
 EASTMONEY_LIMIT_DOWN_URL = "https://push2ex.eastmoney.com/getTopicDTPool"
 PROFILE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -127,14 +128,17 @@ class EastmoneyStockProvider:
 
     def market_indices(self) -> tuple[list[IndexQuote], float, datetime]:
         """Fetch index quotes without loading and sorting the stock universe."""
-        text = self._text(
-            SINA_INDEX_URL + ",".join(item[0] for item in INDEX_CODES),
-            {},
-            referer="https://finance.sina.com.cn/",
-            encoding="gbk",
-            attempts=1,
-            timeout=4,
-        )
+        try:
+            text = self._text(
+                SINA_INDEX_URL + ",".join(item[0] for item in INDEX_CODES),
+                {},
+                referer="https://finance.sina.com.cn/",
+                encoding="gbk",
+                attempts=1,
+                timeout=4,
+            )
+        except MarketProviderError:
+            return self._tencent_market_indices()
         by_code = {item[0]: item for item in INDEX_CODES}
         indices: list[IndexQuote] = []
         turnover_yuan = 0.0
@@ -167,8 +171,55 @@ class EastmoneyStockProvider:
             if source_code in {"sh000001", "sz399001"}:
                 turnover_yuan += max(0.0, _float(parts[9]))
         if len(indices) < 3:
-            raise MarketProviderError("Sina returned no usable A-share indices")
+            return self._tencent_market_indices()
         return indices, round(turnover_yuan / 1_000_000_000, 2), max(observed_values)
+
+    def _tencent_market_indices(self) -> tuple[list[IndexQuote], float, datetime]:
+        text = self._text(
+            TENCENT_QUOTE_URL + ",".join(item[0] for item in INDEX_CODES),
+            {},
+            referer="https://gu.qq.com/",
+            encoding="gbk",
+            attempts=2,
+            timeout=5,
+        )
+        by_code = {item[0]: item for item in INDEX_CODES}
+        indices: list[IndexQuote] = []
+        turnover_billion = 0.0
+        observed_values: list[datetime] = []
+        for line in text.split(";"):
+            if '="' not in line:
+                continue
+            prefix, payload = line.split('="', 1)
+            source_code = prefix.strip().removeprefix("v_")
+            if source_code not in by_code:
+                continue
+            parts = payload.rstrip('"\r\n ').split("~")
+            if len(parts) < 38:
+                continue
+            try:
+                price = float(parts[3])
+                change = float(parts[32])
+                observed = datetime.strptime(parts[30], "%Y%m%d%H%M%S").replace(
+                    tzinfo=SHANGHAI
+                )
+            except (TypeError, ValueError, IndexError):
+                continue
+            if price <= 0:
+                continue
+            _, symbol, fallback_name = by_code[source_code]
+            indices.append(IndexQuote(
+                symbol=symbol,
+                name=parts[1].strip() or fallback_name,
+                price=round(price, 4),
+                change_percent=round(change, 2),
+            ))
+            observed_values.append(observed)
+            if source_code in {"sh000001", "sz399001"}:
+                turnover_billion += max(0.0, _float(parts[37])) / 100_000
+        if len(indices) < 3:
+            raise MarketProviderError("Tencent returned no usable A-share indices")
+        return indices, round(turnover_billion, 2), max(observed_values)
 
     def market_limit_counts(self) -> tuple[int, int, datetime]:
         """Read the dedicated Eastmoney limit-up/down pools instead of inferring a sample."""
@@ -267,12 +318,15 @@ class EastmoneyStockProvider:
         ), datetime.now(SHANGHAI)
 
     def market_news(self, limit: int = 12) -> list[MarketNewsItem]:
-        payload = self._json(SINA_NEWS_URL, {
-            "pageid": 153,
-            "lid": 2516,
-            "num": min(max(limit * 3, 20), 60),
-            "page": 1,
-        }, referer="https://finance.sina.com.cn/stock/", attempts=1, timeout=5)
+        try:
+            payload = self._json(SINA_NEWS_URL, {
+                "pageid": 153,
+                "lid": 2516,
+                "num": min(max(limit * 3, 20), 60),
+                "page": 1,
+            }, referer="https://finance.sina.com.cn/stock/", attempts=1, timeout=5)
+        except (MarketProviderError, json.JSONDecodeError):
+            return self._eastmoney_fast_news(limit)
         rows = ((payload.get("result") or {}).get("data") or [])
         result: list[MarketNewsItem] = []
         seen: set[str] = set()
@@ -294,6 +348,45 @@ class EastmoneyStockProvider:
                 source=str(row.get("media_name") or "新浪财经"),
                 published_at=published_at,
                 url=str(row.get("url") or "") or None,
+            ))
+            if len(result) >= limit:
+                break
+        if not result:
+            return self._eastmoney_fast_news(limit)
+        return result
+
+    def _eastmoney_fast_news(self, limit: int) -> list[MarketNewsItem]:
+        payload = self._json(EASTMONEY_FAST_NEWS_URL, {
+            "client": "web",
+            "biz": "web_724",
+            "fastColumn": "102",
+            "sortEnd": "",
+            "pageSize": min(max(limit * 2, 20), 60),
+            "req_trace": str(int(time.time() * 1000)),
+        }, referer="https://finance.eastmoney.com/", attempts=2, timeout=6)
+        rows = ((payload.get("data") or {}).get("fastNewsList") or [])
+        result: list[MarketNewsItem] = []
+        seen: set[str] = set()
+        for row in rows:
+            headline = _clean_news_text(row.get("title"))
+            news_id = str(row.get("code") or headline)
+            if not headline or news_id in seen:
+                continue
+            seen.add(news_id)
+            try:
+                published_at = datetime.strptime(
+                    str(row.get("showTime")), "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=SHANGHAI)
+            except (TypeError, ValueError):
+                published_at = datetime.now(SHANGHAI)
+            summary = _clean_news_text(row.get("summary"))
+            result.append(MarketNewsItem(
+                news_id=f"EM-FAST-{news_id}",
+                headline=headline,
+                summary=(summary or headline)[:260],
+                source="东方财富快讯",
+                published_at=published_at,
+                url=None,
             ))
             if len(result) >= limit:
                 break

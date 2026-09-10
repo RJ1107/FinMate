@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,24 @@ class MarketMetrics(BaseModel):
     limit_down: int = Field(ge=0)
     turnover_billion_cny: float = Field(ge=0)
     sentiment_score: float = Field(ge=0, le=100)
+
+
+class MarketPulseMetrics(BaseModel):
+    advancers: int | None = Field(default=None, ge=0)
+    decliners: int | None = Field(default=None, ge=0)
+    unchanged: int | None = Field(default=None, ge=0)
+    limit_up: int | None = Field(default=None, ge=0)
+    limit_down: int | None = Field(default=None, ge=0)
+    turnover_billion_cny: float | None = Field(default=None, ge=0)
+    sentiment_score: float | None = Field(default=None, ge=0, le=100)
+
+
+class MarketPulse(BaseModel):
+    market: str = "CN-A"
+    indices: list[IndexQuote]
+    metrics: MarketPulseMetrics
+    breadth_status: Literal["ready", "updating", "unavailable"]
+    provenance: Provenance
 
 
 class StockQuote(BaseModel):

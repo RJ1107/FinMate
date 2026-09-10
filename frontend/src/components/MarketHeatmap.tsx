@@ -29,6 +29,7 @@ interface TileLayout {
 }
 
 interface HeaderLayout {
+  id: string;
   name: string;
   x: number;
   y: number;
@@ -40,6 +41,7 @@ interface ZoneLayout {
   label: string;
   top: number;
   count: number;
+  noun: string;
 }
 
 interface Props {
@@ -53,6 +55,7 @@ interface Props {
 
 const ZONE_GAP = 12;
 const ZONE_HEADER = 30;
+const SECTOR_HEADER = 28;
 
 export function MarketHeatmap({
   overview,
@@ -82,35 +85,55 @@ export function MarketHeatmap({
     if (size.width <= 0 || size.height <= 0) return { tiles, headers, zones };
 
     if (entityMode === "stocks") {
-      const children: TreeDatum[] = overview.sectors.map((sector) => ({
+      const seen = new Set<string>();
+      const groups = overview.sectors.map((sector) => ({
         name: sector.name,
-        children: sector.stocks.map((stock) => ({
-          name: stock.name,
-          entity: {
+        entities: sector.stocks.flatMap((stock) => {
+          if (seen.has(stock.symbol)) return [];
+          seen.add(stock.symbol);
+          return [{
             id: stock.symbol,
             name: stock.name,
             subtitle: stock.symbol,
             change: stock.change_percent,
             weight: Math.sqrt(Math.max(1, stock.turnover_million_cny)),
             stock,
-          },
-        })),
-      }));
-      const tree = makeTree(children, size.width, size.height, 25);
-      tree.children?.forEach((sector) => headers.push({
-        name: sector.data.name,
-        x: sector.x0,
-        y: sector.y0,
-        width: Math.max(0, sector.x1 - sector.x0),
-      }));
-      tree.leaves().forEach((node) => {
-        if (!node.data.entity) return;
-        tiles.push({
-          entity: node.data.entity,
-          x: node.x0,
-          y: node.y0,
-          width: Math.max(0, node.x1 - node.x0),
-          height: Math.max(0, node.y1 - node.y0),
+          }];
+        }),
+      })).filter((group) => group.entities.length > 0);
+      const zoneHeight = Math.max(1, (size.height - ZONE_GAP) / 2);
+      const definitions = [
+        { tone: "up" as const, label: "上涨区  RISING", top: 0, accept: (change: number) => change >= 0 },
+        { tone: "down" as const, label: "下跌区  FALLING", top: zoneHeight + ZONE_GAP, accept: (change: number) => change < 0 },
+      ];
+      definitions.forEach((zone) => {
+        const zoneGroups = groups.map((group) => ({
+          name: group.name,
+          entities: group.entities.filter((entity) => zone.accept(entity.change)),
+        })).filter((group) => group.entities.length > 0);
+        const children: TreeDatum[] = zoneGroups.map((group) => ({
+          name: group.name,
+          children: group.entities.map((entity) => ({ name: entity.name, entity })),
+        }));
+        const count = zoneGroups.reduce((total, group) => total + group.entities.length, 0);
+        zones.push({ tone: zone.tone, label: zone.label, top: zone.top, count, noun: "只个股" });
+        const tree = makeTree(children, size.width, zoneHeight, ZONE_HEADER, SECTOR_HEADER);
+        tree.children?.forEach((sector) => headers.push({
+          id: zone.tone + ":" + sector.data.name,
+          name: sector.data.name,
+          x: sector.x0,
+          y: sector.y0 + zone.top,
+          width: Math.max(0, sector.x1 - sector.x0),
+        }));
+        tree.leaves().forEach((node) => {
+          if (!node.data.entity) return;
+          tiles.push({
+            entity: node.data.entity,
+            x: node.x0,
+            y: node.y0 + zone.top,
+            width: Math.max(0, node.x1 - node.x0),
+            height: Math.max(0, node.y1 - node.y0),
+          });
         });
       });
       return { tiles, headers, zones };
@@ -126,11 +149,11 @@ export function MarketHeatmap({
     }));
     const zoneHeight = Math.max(1, (size.height - ZONE_GAP) / 2);
     const definitions = [
-      { tone: "up" as const, label: "上升区  RISING", top: 0, items: entities.filter((item) => item.change >= 0) },
-      { tone: "down" as const, label: "下降区  FALLING", top: zoneHeight + ZONE_GAP, items: entities.filter((item) => item.change < 0) },
+      { tone: "up" as const, label: "上涨区  RISING", top: 0, items: entities.filter((item) => item.change >= 0) },
+      { tone: "down" as const, label: "下跌区  FALLING", top: zoneHeight + ZONE_GAP, items: entities.filter((item) => item.change < 0) },
     ];
     definitions.forEach((zone) => {
-      zones.push({ tone: zone.tone, label: zone.label, top: zone.top, count: zone.items.length });
+      zones.push({ tone: zone.tone, label: zone.label, top: zone.top, count: zone.items.length, noun: "个板块" });
       const children = zone.items.map((entity) => ({ name: entity.name, entity }));
       const tree = makeTree(children, size.width, zoneHeight, ZONE_HEADER);
       tree.leaves().forEach((node) => {
@@ -171,13 +194,13 @@ export function MarketHeatmap({
           key={zone.tone}
           style={{ top: zone.top }}
         >
-          {zone.label}<small>{zone.count} 个概念</small>
+          {zone.label}<small>{zone.count} {zone.noun}</small>
         </div>
       ))}
       {layout.headers.map((header) => (
         <div
           className="heatmap-sector"
-          key={header.name}
+          key={header.id}
           style={{ left: header.x, top: header.y, width: header.width, height: 23 }}
           title={header.name}
         >
@@ -196,6 +219,7 @@ export function MarketHeatmap({
             className={"heatmap-tile" + (selected ? " heatmap-tile--selected" : "")}
             aria-label={entity.name + " " + change}
             aria-pressed={selected}
+            data-zone={entity.change >= 0 ? "up" : "down"}
             title={entity.name + " · " + change + " · " + entity.subtitle}
             style={{
               left: x,
@@ -216,7 +240,13 @@ export function MarketHeatmap({
   );
 }
 
-function makeTree(children: TreeDatum[], width: number, height: number, paddingTop: number) {
+function makeTree(
+  children: TreeDatum[],
+  width: number,
+  height: number,
+  paddingTop: number,
+  groupPaddingTop = 3,
+) {
   const root = hierarchy<TreeDatum>({ name: "A 股", children })
     .sum((item) => item.entity?.weight ?? 0)
     .sort((left, right) => (right.value ?? 0) - (left.value ?? 0));
@@ -224,6 +254,8 @@ function makeTree(children: TreeDatum[], width: number, height: number, paddingT
     .size([width, height])
     .paddingOuter(3)
     .paddingInner(3)
-    .paddingTop((node) => node.depth === 0 ? paddingTop : 3)
+    .paddingTop((node) => node.depth === 0
+      ? paddingTop
+      : node.depth === 1 && node.children ? groupPaddingTop : 3)
     .round(true)(root);
 }

@@ -14,6 +14,7 @@ export type MarketEntityMode = "stocks" | "sectors";
 
 interface Props {
   overview: MarketOverview;
+  theme: "dark" | "light";
   entityMode: MarketEntityMode;
   selectedSymbol: string | null;
   selectedSector: string | null;
@@ -63,6 +64,7 @@ const MOTION_ALPHA = 0.075;
 
 export function MarketMap({
   overview,
+  theme,
   entityMode,
   selectedSymbol,
   selectedSector,
@@ -124,7 +126,7 @@ export function MarketMap({
       const ratio = window.devicePixelRatio || 1;
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       context.clearRect(0, 0, width, height);
-      drawField(context, width, height);
+      drawField(context, width, height, theme);
       const hoveredId = hoveredRef.current?.entity.id;
       for (const node of nodesRef.current) {
         if (node.entity.id === hoveredId) continue;
@@ -188,6 +190,9 @@ export function MarketMap({
           } : undefined,
         };
       });
+      canvas.dataset.changeLabelCount = String(
+        nodesRef.current.filter((node) => shouldShowChange(node)).length,
+      );
 
       constrainNodes(nodesRef.current, width, height, now);
       separateNodes(nodesRef.current, width, height, now, 10);
@@ -251,7 +256,7 @@ export function MarketMap({
       if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
     };
-  }, [entities, entityMode, selectedId]);
+  }, [entities, entityMode, selectedId, theme]);
 
   useEffect(() => {
     hoveredRef.current = hovered;
@@ -324,15 +329,21 @@ export function MarketMap({
   );
 }
 
-function drawField(context: CanvasRenderingContext2D, width: number, height: number) {
-  context.fillStyle = "#090b0e";
+function drawField(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  theme: "dark" | "light",
+) {
+  const light = theme === "light";
+  context.fillStyle = light ? "#f8fafc" : "#090b0e";
   context.fillRect(0, 0, width, height);
-  context.fillStyle = "rgba(185, 54, 64, 0.045)";
+  context.fillStyle = light ? "rgba(185, 54, 64, 0.055)" : "rgba(185, 54, 64, 0.045)";
   context.fillRect(0, 0, width, height / 2 - BOUNDARY_HALF_GAP);
-  context.fillStyle = "rgba(12, 134, 99, 0.045)";
+  context.fillStyle = light ? "rgba(12, 134, 99, 0.055)" : "rgba(12, 134, 99, 0.045)";
   context.fillRect(0, height / 2 + BOUNDARY_HALF_GAP, width, height / 2 - BOUNDARY_HALF_GAP);
 
-  context.strokeStyle = "#181c21";
+  context.strokeStyle = light ? "#e2e7ec" : "#181c21";
   context.lineWidth = 1;
   for (let x = 0; x <= width; x += 48) {
     context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke();
@@ -341,10 +352,10 @@ function drawField(context: CanvasRenderingContext2D, width: number, height: num
     context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
   }
 
-  context.fillStyle = "rgba(9, 11, 14, .94)";
+  context.fillStyle = light ? "rgba(248, 250, 252, .94)" : "rgba(9, 11, 14, .94)";
   context.fillRect(0, height / 2 - BOUNDARY_HALF_GAP, width, BOUNDARY_HALF_GAP * 2);
   context.setLineDash([6, 6]);
-  context.strokeStyle = "#47515a";
+  context.strokeStyle = light ? "#9aa5af" : "#47515a";
   context.beginPath(); context.moveTo(0, height / 2); context.lineTo(width, height / 2); context.stroke();
   context.setLineDash([]);
   context.font = "600 11px Inter, Microsoft YaHei, sans-serif";
@@ -385,12 +396,17 @@ function drawBubble(
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.fillStyle = "#f7f8f9";
-  context.fillText(node.entity.name, x, y - (node.radius >= 21 ? 5 : 0), maxTextWidth);
-  if (Math.abs(change) >= 1 && node.radius >= 18) {
+  const showChange = shouldShowChange(node);
+  context.fillText(node.entity.name, x, y - (showChange ? 5 : 0), maxTextWidth);
+  if (showChange) {
     context.font = "700 " + Math.max(8, Math.min(10, node.radius * 0.27)) + "px Inter, sans-serif";
     context.fillText(formatSigned(change) + "%", x, y + 9, maxTextWidth);
   }
   context.restore();
+}
+
+function shouldShowChange(node: BubbleNode) {
+  return Boolean(node.entity.sector) || node.radius >= 18;
 }
 
 function makeAnchors(count: number, width: number, height: number, upper: boolean) {
@@ -429,11 +445,11 @@ function bubbleRadius(
   const packingRadius = Math.sqrt(zoneArea / Math.max(zoneCount, 1) / Math.PI);
   const normalizedMove = Math.pow(Math.min(Math.abs(change), 10) / 10, 0.55);
   const movementScale = 0.5 + normalizedMove * 1.25;
-  const densityScale = mode === "sectors" ? 0.44 : width < 640 ? 0.68 : 0.55;
+  const densityScale = mode === "sectors" ? 0.68 : width < 640 ? 0.68 : 0.55;
   return clamp(
     packingRadius * densityScale * movementScale,
-    mode === "sectors" ? 24 : width < 640 ? 11 : 15,
-    mode === "sectors" ? 62 : 48,
+    mode === "sectors" ? 18 : width < 640 ? 11 : 15,
+    mode === "sectors" ? 54 : 48,
   );
 }
 
@@ -564,6 +580,12 @@ function recordLayout(
   )).toFixed(1);
   canvas.dataset.crossingCount = String(nodes.filter((node) => node.crossing).length);
   canvas.dataset.layoutWidth = String(Math.round(width));
+  const hitTarget = nodes[0];
+  if (hitTarget) {
+    canvas.dataset.hitX = String(hitTarget.x ?? 0);
+    canvas.dataset.hitY = String(hitTarget.y ?? 0);
+    canvas.dataset.hitName = hitTarget.entity.name;
+  }
 }
 
 function clamp(value: number, min: number, max: number) {

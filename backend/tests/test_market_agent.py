@@ -1,5 +1,8 @@
+from datetime import UTC, datetime
+
 from app.agents.market_fact import MarketFactAgent
 from app.domain.agent import AgentIntent
+from app.domain.models import MarketNewsItem
 from app.services.llm import AnswerRefinementError, RefinedAnswer
 from app.services.market import MarketService
 from tests.test_market_service import OnDemandProvider
@@ -45,7 +48,24 @@ def test_limit_question_answers_the_requested_market_fact() -> None:
     assert answer.intent == AgentIntent.MARKET_SUMMARY
     assert "涨停 67 家，跌停 12 家" in answer.answer
     assert len(answer.evidence) == 2
-    assert answer.evidence[0].title == "样本涨跌停家数"
+    assert answer.evidence[0].title == "全市场涨跌停家数"
+
+
+def test_market_news_uses_retrieved_documents_as_evidence() -> None:
+    item = MarketNewsItem(
+        news_id="news-1",
+        headline="半导体板块发布最新产业消息",
+        summary="相关企业披露产业链进展。",
+        source="测试财经",
+        published_at=datetime.now(UTC),
+        url="https://example.test/news-1",
+    )
+
+    answer = make_agent().ask("半导体有什么最新新闻？", retrieved_news=[item])
+
+    assert answer.intent == AgentIntent.MARKET_NEWS
+    assert answer.evidence[0].source == "测试财经"
+    assert answer.trace[2].node == "compose_news"
 
 
 def test_model_refines_deterministic_answer_and_keeps_evidence() -> None:
@@ -67,7 +87,7 @@ def test_model_failure_falls_back_to_deterministic_answer() -> None:
 
     assert answer.answer_mode == "deterministic"
     assert answer.model is None
-    assert "只观察样本中整体" in answer.answer
+    assert "当前主要指数" in answer.answer
     assert answer.trace[-1].summary == "调用失败，保留确定性结论"
 
 
@@ -87,6 +107,64 @@ def test_unknown_question_states_current_boundary() -> None:
     assert answer.intent == AgentIntent.UNKNOWN
     assert answer.confidence == 0.6
     assert "通用金融知识" in answer.answer
+
+
+def test_portfolio_question_uses_profile_memory_without_requiring_a_stock() -> None:
+    memory = (
+        "用户明确保存的长期画像：风险承受=积极；期限=3-5 年；目标=长期成长；\n"
+        "当前模拟组合（长期状态）：初始资金=100000.00元；可用资金=100000.00元；持仓=无持仓"
+    )
+    answer = make_agent().ask(
+        "结合我的用户画像，如果有10万，股票、基金、黄金如何分配？",
+        memory_context=memory,
+    )
+
+    assert answer.intent == AgentIntent.PORTFOLIO_ALLOCATION
+    assert "宽基与行业基金 35%" in answer.answer
+    assert "个股 30%" in answer.answer
+    assert "黄金 10%" in answer.answer
+    assert answer.trace[-1].node == "compose_portfolio"
+
+
+def test_portfolio_question_understands_w_amount_and_investment_wording() -> None:
+    memory = (
+        "用户明确保存的长期画像：收入=10-30 万；经验=1-3 年；风险承受=积极；"
+        "最大回撤=约20%；期限=1-3 年；目标=稳健增值；流动性=较低；"
+        "关注=人工智能机会；补充=不使用杠杆\n"
+        "当前模拟组合（长期状态）：初始资金=200000.00元；可用资金=200000.00元；持仓=无持仓"
+    )
+
+    answer = make_agent().ask("我如果有20w，该如何配置投资呢", memory_context=memory)
+
+    assert answer.intent == AgentIntent.PORTFOLIO_ALLOCATION
+    assert answer.answer.startswith("结合您已保存的用户画像")
+    assert "现金管理 10%（约 2 万元）" in answer.answer
+    assert "个股 30%（约 6 万元）" in answer.answer
+    assert "人工智能机会" in answer.answer
+    assert "股票代码" not in answer.answer
+
+
+def test_portfolio_model_answer_keeps_explicit_user_profile_prefix() -> None:
+    class PortfolioRefiner:
+        def refine(self, question, draft, evidence):
+            return RefinedAnswer(
+                content=(
+                    "结合您的积极型画像（1-3 年），建议将 20 万分配到现金管理、"
+                    "中短债、基金、黄金和个股。"
+                ),
+                model="qwen/test",
+            )
+
+    answer = MarketFactAgent(
+        MarketService(provider_name="demo"),
+        PortfolioRefiner(),
+    ).ask(
+        "我如果有20w，该如何配置投资呢",
+        memory_context="用户明确保存的长期画像：风险承受=积极；期限=1-3 年",
+    )
+
+    assert answer.answer_mode == "model"
+    assert answer.answer.startswith("结合您的用户画像（1-3 年）")
 
 
 def test_financial_concept_reaches_model_without_invented_market_evidence() -> None:

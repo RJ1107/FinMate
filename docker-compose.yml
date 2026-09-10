@@ -1,4 +1,21 @@
 services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: finmate
+      POSTGRES_USER: finmate
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - finmate-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finmate -d finmate"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -6,6 +23,11 @@ services:
       APP_ENV: production
       MARKET_PROVIDER: ${MARKET_PROVIDER:-auto}
       MARKET_CACHE_TTL_SECONDS: ${MARKET_CACHE_TTL_SECONDS:-60}
+      DATABASE_HOST: database
+      DATABASE_PORT: 5432
+      DATABASE_NAME: finmate
+      DATABASE_USER: finmate
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
       CORS_ORIGINS: http://localhost:8080
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
@@ -15,6 +37,9 @@ services:
       OPENROUTER_APP_TITLE: ${OPENROUTER_APP_TITLE:-FinMate}
     ports:
       - "8000:8000"
+    depends_on:
+      database:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -26,3 +51,6 @@ services:
     ports:
       - "8080:80"
     restart: unless-stopped
+
+volumes:
+  finmate-postgres-data:

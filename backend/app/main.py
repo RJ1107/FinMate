@@ -7,14 +7,17 @@ from app.agents.market_fact import MarketFactAgent
 from app.api.routes.agent import router as agent_router
 from app.api.routes.health import router as health_router
 from app.api.routes.market import router as market_router
+from app.api.routes.memory import router as memory_router
 from app.config import get_settings
 from app.services.llm import OpenRouterAnswerRefiner
 from app.services.market import MarketService
+from app.services.memory import MemoryStore
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    app.state.memory_store = MemoryStore(settings.database_dsn)
     app.state.market_service = MarketService(
         provider_name=settings.market_provider,
         cache_ttl_seconds=settings.market_cache_ttl_seconds,
@@ -35,6 +38,7 @@ async def lifespan(app: FastAPI):
         use_live_market_overlay=True,
     )
     yield
+    app.state.memory_store.close()
 
 
 def create_app() -> FastAPI:
@@ -49,11 +53,12 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["*"],
     )
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(market_router, prefix="/api/v1")
+    app.include_router(memory_router, prefix="/api/v1")
     app.include_router(agent_router, prefix="/api/v1")
     return app
 

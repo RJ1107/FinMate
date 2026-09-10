@@ -1,11 +1,17 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from threading import Lock
+from threading import Lock, Thread
 from zoneinfo import ZoneInfo
 
 from app.domain.models import (
     DataMode,
+    IndexQuote,
+    MarketNewsItem,
     MarketOverview,
+    MarketPulse,
+    MarketPulseMetrics,
+    Provenance,
     QuoteBatch,
     SectorSnapshot,
     StockDetail,
@@ -25,6 +31,23 @@ class _CacheEntry:
     expires_at: datetime
 
 
+@dataclass
+class _BreadthEntry:
+    metrics: MarketPulseMetrics
+    observed_at: datetime
+    expires_at: datetime
+
+
+@dataclass
+class _PulseCore:
+    indices: list[IndexQuote]
+    turnover: float
+    limit_up: int | None
+    limit_down: int | None
+    observed_at: datetime
+    expires_at: datetime
+
+
 class MarketService:
     def __init__(self, provider_name: str = "auto", cache_ttl_seconds: int = 60) -> None:
         self.provider_name = provider_name.lower()
@@ -33,12 +56,18 @@ class MarketService:
         self.stock_provider = EastmoneyStockProvider()
         self.live_provider: MarketDataProvider = self.stock_provider
         self._cache: _CacheEntry | None = None
+        self._breadth_cache: _BreadthEntry | None = None
+        self._pulse_core: _PulseCore | None = None
+        self._breadth_refreshing = False
+        self._breadth_failed = False
         self._resource_cache: dict[str, tuple[datetime, object]] = {}
         self._lock = Lock()
+        self._overview_lock = Lock()
+        self._pulse_lock = Lock()
 
     def get_overview(self, force_refresh: bool = False) -> MarketOverview:
         now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-        with self._lock:
+        with self._overview_lock:
             if not force_refresh and self._cache and now < self._cache.expires_at:
                 return self._as_cached(self._cache.overview, now)
 
@@ -48,10 +77,6 @@ class MarketService:
                 try:
                     overview = self.live_provider.get_market_overview()
                     baseline = self.demo_provider.get_market_overview()
-                    if not overview.indices:
-                        overview.indices = baseline.indices
-                    if not overview.reference_indices:
-                        overview.reference_indices = baseline.reference_indices
                     overview.sectors = self._enrich_display_sectors(
                         overview.sectors, baseline.sectors
                     )
@@ -63,23 +88,128 @@ class MarketService:
                 except MarketProviderError as exc:
                     overview = self.demo_provider.get_market_overview()
                     overview.provenance.fallback_reason = str(exc)
-                    try:
-                        overview.industry_sectors = self.stock_provider.market_sectors()
-                    except MarketProviderError:
-                        pass
+                    sector_loader = getattr(self.stock_provider, "market_sectors", None)
+                    if callable(sector_loader):
+                        try:
+                            overview.industry_sectors = sector_loader()
+                        except MarketProviderError:
+                            pass
 
             overview.industry_sectors = self._enrich_industry_sectors(
                 overview.industry_sectors, overview.sectors
             )
 
-            if overview.industry_sectors:
-                self._resource_cache["market-sectors"] = (
-                    now + timedelta(seconds=15),
-                    overview.industry_sectors,
-                )
-
-            self._cache = _CacheEntry(overview=overview, expires_at=now + self.cache_ttl)
+            with self._lock:
+                if overview.industry_sectors:
+                    self._resource_cache["market-sectors"] = (
+                        now + timedelta(seconds=15),
+                        overview.industry_sectors,
+                    )
+                self._cache = _CacheEntry(overview=overview, expires_at=now + self.cache_ttl)
             return overview
+
+    def get_pulse(self, force_refresh: bool = False) -> MarketPulse:
+        now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+        if self.provider_name == "demo":
+            overview = self.demo_provider.get_market_overview()
+            return MarketPulse(
+                indices=overview.indices,
+                metrics=MarketPulseMetrics(**overview.metrics.model_dump()),
+                breadth_status="ready",
+                provenance=overview.provenance,
+            )
+
+        with self._pulse_lock:
+            core = self._pulse_core
+            if force_refresh or core is None or now >= core.expires_at:
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="finmate-pulse") as executor:
+                    index_future = executor.submit(self.stock_provider.market_indices)
+                    limits_future = executor.submit(self.stock_provider.market_limit_counts)
+                    indices, turnover, observed_at = index_future.result()
+                    try:
+                        limit_up, limit_down, _ = limits_future.result()
+                    except MarketProviderError:
+                        limit_up = limit_down = None
+                core = _PulseCore(
+                    indices=indices,
+                    turnover=turnover,
+                    limit_up=limit_up,
+                    limit_down=limit_down,
+                    observed_at=observed_at,
+                    expires_at=now + timedelta(seconds=5),
+                )
+                self._pulse_core = core
+            indices = core.indices
+            turnover = core.turnover
+            limit_up = core.limit_up
+            limit_down = core.limit_down
+            observed_at = core.observed_at
+        with self._lock:
+            breadth = self._breadth_cache
+            needs_refresh = force_refresh or breadth is None or now >= breadth.expires_at
+            start_refresh = needs_refresh and not self._breadth_refreshing
+            if start_refresh:
+                self._breadth_refreshing = True
+                self._breadth_failed = False
+            failed = self._breadth_failed
+        if start_refresh:
+            Thread(target=self._refresh_breadth, name="finmate-breadth-refresh", daemon=True).start()
+
+        if breadth is None:
+            metrics = MarketPulseMetrics(
+                limit_up=limit_up,
+                limit_down=limit_down,
+                turnover_billion_cny=turnover,
+            )
+            status = "unavailable" if failed else "updating"
+        else:
+            metrics = breadth.metrics.model_copy(update={
+                "limit_up": limit_up if limit_up is not None else breadth.metrics.limit_up,
+                "limit_down": limit_down if limit_down is not None else breadth.metrics.limit_down,
+                "turnover_billion_cny": turnover,
+            })
+            status = "ready"
+        return MarketPulse(
+            indices=indices,
+            metrics=metrics,
+            breadth_status=status,
+            provenance=Provenance(
+                source="sina-index-and-a-share-breadth",
+                mode=DataMode.LIVE,
+                observed_at=observed_at,
+                retrieved_at=now,
+            ),
+        )
+
+    def _refresh_breadth(self) -> None:
+        try:
+            metrics, observed_at = self.stock_provider.market_breadth()
+            with self._lock:
+                self._breadth_cache = _BreadthEntry(
+                    metrics=metrics,
+                    observed_at=observed_at,
+                    expires_at=datetime.now(tz=ZoneInfo("Asia/Shanghai")) + self.cache_ttl,
+                )
+                self._breadth_failed = False
+        except MarketProviderError:
+            with self._lock:
+                self._breadth_failed = True
+        finally:
+            with self._lock:
+                self._breadth_refreshing = False
+
+    def get_market_news(self, query: str = "", limit: int = 8) -> list[MarketNewsItem]:
+        news = self._cached_resource(
+            "market-news", 60, lambda: self.stock_provider.market_news(36)
+        )
+        items = list(news)
+        normalized = query.strip().lower()
+        if normalized:
+            items.sort(
+                key=lambda item: (_news_score(normalized, item), item.published_at.timestamp()),
+                reverse=True,
+            )
+        return items[:limit]
 
     def get_stock(self, symbol: str) -> StockDetail | None:
         overview = self.get_overview()
@@ -200,16 +330,23 @@ class MarketService:
             key, 60, lambda: self.stock_provider.sector_stocks(sector_id, name, limit)
         )
         overview = self.get_overview()
+        display = next(
+            (sector for sector in overview.sectors if sector.name == name),
+            None,
+        )
         aggregate = next(
             (sector for sector in overview.industry_sectors if sector.sector_id == sector_id),
             None,
         )
         if aggregate is None:
-            return detail
+            return detail if detail.stocks or display is None else detail.model_copy(
+                update={"stocks": display.stocks[:limit]}
+            )
         return detail.model_copy(update={
             "change_percent": aggregate.change_percent,
             "turnover_billion_cny": aggregate.turnover_billion_cny,
             "constituent_count": aggregate.constituent_count,
+            "stocks": detail.stocks if detail.stocks else (display.stocks[:limit] if display else []),
         })
 
     def get_industry_sectors(self) -> list[SectorSnapshot]:
@@ -337,3 +474,10 @@ class MarketService:
             cached.provenance.mode = DataMode.CACHED
         cached.provenance.retrieved_at = retrieved_at
         return cached
+
+
+def _news_score(query: str, item: MarketNewsItem) -> int:
+    haystack = f"{item.headline} {item.summary}".lower()
+    compact = "".join(query.split())
+    tokens = {compact[index:index + 2] for index in range(max(0, len(compact) - 1))}
+    return sum(token in haystack for token in tokens) + (3 if compact in haystack else 0)

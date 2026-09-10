@@ -3,7 +3,9 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from app.domain.models import (
+    MarketNewsItem,
     MarketOverview,
+    MarketPulse,
     QuoteBatch,
     SectorSnapshot,
     StockDetail,
@@ -27,6 +29,31 @@ def market_overview(
     refresh: Annotated[bool, Query(description="Bypass the in-memory cache")] = False,
 ) -> MarketOverview:
     return get_market_service(request).get_overview(force_refresh=refresh)
+
+
+@router.get("/pulse", response_model=MarketPulse)
+def market_pulse(
+    request: Request,
+    refresh: Annotated[bool, Query(description="Refresh live index and breadth caches")] = False,
+) -> MarketPulse:
+    try:
+        return get_market_service(request).get_pulse(force_refresh=refresh)
+    except MarketProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
+@router.get("/news", response_model=list[MarketNewsItem])
+def market_news(
+    request: Request,
+    q: Annotated[str, Query(max_length=80)] = "",
+    limit: Annotated[int, Query(ge=1, le=36)] = 8,
+) -> list[MarketNewsItem]:
+    try:
+        items = get_market_service(request).get_market_news(q, limit)
+        request.app.state.memory_store.ingest_news(items)
+        return items
+    except MarketProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 @router.get("/stocks/{symbol}", response_model=StockDetail)

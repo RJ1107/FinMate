@@ -2,6 +2,7 @@ import html
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,9 +12,11 @@ import requests
 from app.domain.models import (
     Candle,
     DataMode,
+    IndexQuote,
     MarketMetrics,
     MarketNewsItem,
     MarketOverview,
+    MarketPulseMetrics,
     Provenance,
     QuoteBatch,
     SectorSnapshot,
@@ -38,6 +41,8 @@ SINA_COUNT_URL = (
 )
 SINA_SW_SECTOR_URL = "https://vip.stock.finance.sina.com.cn/q/view/SwHy.php"
 EASTMONEY_NEWS_SEARCH_URL = "https://search-api-web.eastmoney.com/search/jsonp"
+EASTMONEY_LIMIT_UP_URL = "https://push2ex.eastmoney.com/getTopicZTPool"
+EASTMONEY_LIMIT_DOWN_URL = "https://push2ex.eastmoney.com/getTopicDTPool"
 PROFILE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
 TENCENT_FIVE_DAY_URL = "https://web.ifzq.gtimg.cn/appstock/app/day/query"
@@ -45,7 +50,16 @@ TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 TENCENT_SEARCH_URL = "https://smartbox.gtimg.cn/s3/"
 SUGGEST_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"
-CONCEPT_DISPLAY_LIMIT = 60
+CONCEPT_DISPLAY_LIMIT = 72
+SINA_INDEX_URL = "https://hq.sinajs.cn/list="
+SINA_NEWS_URL = "https://feed.mix.sina.com.cn/api/roll/get"
+INDEX_CODES = (
+    ("sh000001", "000001", "上证指数"),
+    ("sz399001", "399001", "深证成指"),
+    ("sz399006", "399006", "创业板指"),
+    ("sh000688", "000688", "科创 50"),
+    ("sh000300", "000300", "沪深 300"),
+)
 
 
 class EastmoneyStockProvider:
@@ -62,12 +76,20 @@ class EastmoneyStockProvider:
 
     def get_market_overview(self, display_limit: int = 180) -> MarketOverview:
         """Select a readable turnover-ranked view from the full A-share universe."""
-        try:
-            stocks, universe_total = self._eastmoney_market_leaders(display_limit)
-            source = "eastmoney-a-share-turnover-ranking"
-        except MarketProviderError:
-            stocks, universe_total = self._sina_market_leaders(display_limit)
-            source = "sina-a-share-turnover-ranking"
+        def load_stocks():
+            try:
+                return (*self._sina_market_leaders(display_limit), "sina-a-share-turnover-ranking")
+            except MarketProviderError:
+                return (*self._eastmoney_market_leaders(display_limit), "eastmoney-a-share-turnover-ranking")
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="finmate-map") as executor:
+            stocks_future = executor.submit(load_stocks)
+            sectors_future = executor.submit(self.market_sectors)
+            stocks, universe_total, source = stocks_future.result()
+            try:
+                industry_sectors = sectors_future.result()
+            except MarketProviderError:
+                industry_sectors = []
         if not stocks:
             raise MarketProviderError("No usable A-share turnover ranking was returned")
 
@@ -77,10 +99,6 @@ class EastmoneyStockProvider:
         unchanged = len(stocks) - advancers - decliners
         directional = max(advancers + decliners, 1)
         now = datetime.now(SHANGHAI)
-        try:
-            industry_sectors = self.market_sectors()
-        except MarketProviderError:
-            industry_sectors = []
         return MarketOverview(
             indices=[],
             metrics=MarketMetrics(
@@ -106,6 +124,182 @@ class EastmoneyStockProvider:
             displayed_count=len(stocks),
             selection_method="全市场成交额前列",
         )
+
+    def market_indices(self) -> tuple[list[IndexQuote], float, datetime]:
+        """Fetch index quotes without loading and sorting the stock universe."""
+        text = self._text(
+            SINA_INDEX_URL + ",".join(item[0] for item in INDEX_CODES),
+            {},
+            referer="https://finance.sina.com.cn/",
+            encoding="gbk",
+            attempts=1,
+            timeout=4,
+        )
+        by_code = {item[0]: item for item in INDEX_CODES}
+        indices: list[IndexQuote] = []
+        turnover_yuan = 0.0
+        observed_values: list[datetime] = []
+        for line in text.splitlines():
+            match = re.search(r'hq_str_(\w+)="(.*)";?', line)
+            if not match or match.group(1) not in by_code:
+                continue
+            parts = match.group(2).split(",")
+            if len(parts) < 32:
+                continue
+            try:
+                previous = float(parts[2])
+                price = float(parts[3])
+                observed = datetime.strptime(
+                    f"{parts[30]} {parts[31]}", "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=SHANGHAI)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if price <= 0 or previous <= 0:
+                continue
+            source_code, symbol, fallback_name = by_code[match.group(1)]
+            indices.append(IndexQuote(
+                symbol=symbol,
+                name=parts[0].strip() or fallback_name,
+                price=round(price, 4),
+                change_percent=round((price / previous - 1) * 100, 2),
+            ))
+            observed_values.append(observed)
+            if source_code in {"sh000001", "sz399001"}:
+                turnover_yuan += max(0.0, _float(parts[9]))
+        if len(indices) < 3:
+            raise MarketProviderError("Sina returned no usable A-share indices")
+        return indices, round(turnover_yuan / 1_000_000_000, 2), max(observed_values)
+
+    def market_limit_counts(self) -> tuple[int, int, datetime]:
+        """Read the dedicated Eastmoney limit-up/down pools instead of inferring a sample."""
+        date_text = datetime.now(SHANGHAI).strftime("%Y%m%d")
+        common = {
+            "ut": "7eea3edcaed734bea9cbfc24409ed989",
+            "dpt": "wz.ztzt",
+            "Pageindex": 0,
+            "pagesize": 1,
+            "date": date_text,
+        }
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="finmate-limits") as executor:
+            up_future = executor.submit(
+                self._json, EASTMONEY_LIMIT_UP_URL, {**common, "sort": "fbt:asc"},
+                "https://quote.eastmoney.com/", 1, 5,
+            )
+            down_future = executor.submit(
+                self._json, EASTMONEY_LIMIT_DOWN_URL, {**common, "sort": "fund:asc"},
+                "https://quote.eastmoney.com/", 1, 5,
+            )
+            up_payload = up_future.result()
+            down_payload = down_future.result()
+        try:
+            limit_up = int((up_payload.get("data") or {}).get("tc") or 0)
+            limit_down = int((down_payload.get("data") or {}).get("tc") or 0)
+        except (TypeError, ValueError) as exc:
+            raise MarketProviderError(f"Limit pool returned invalid totals: {exc}") from exc
+        if up_payload.get("rc") != 0 or down_payload.get("rc") != 0:
+            raise MarketProviderError("Eastmoney limit pool was unavailable")
+        return limit_up, limit_down, datetime.now(SHANGHAI)
+
+    def market_breadth(self) -> tuple[MarketPulseMetrics, datetime]:
+        """Scan all A shares. The service runs this off the request path and caches it."""
+        headers = {**self.headers, "Referer": "https://finance.sina.com.cn/"}
+        try:
+            response = requests.get(
+                SINA_COUNT_URL, params={"node": "hs_a"}, headers=headers, timeout=4
+            )
+            response.raise_for_status()
+            count_match = re.search(r"\d+", response.text)
+            total = int(count_match.group()) if count_match else 0
+        except (requests.RequestException, ValueError) as exc:
+            raise MarketProviderError(f"A-share count request failed: {exc}") from exc
+        if total <= 0:
+            raise MarketProviderError("A-share count was empty")
+
+        page_size = 100
+        pages = range(1, (total + page_size - 1) // page_size + 1)
+
+        def load_page(page: int) -> list[dict[str, Any]]:
+            page_response = requests.get(SINA_RANK_URL, params={
+                "page": page,
+                "num": page_size,
+                "sort": "symbol",
+                "asc": 1,
+                "node": "hs_a",
+                "symbol": "",
+                "_s_r_a": "page",
+            }, headers=headers, timeout=5)
+            page_response.raise_for_status()
+            payload = page_response.json()
+            return payload if isinstance(payload, list) else []
+
+        rows: list[dict[str, Any]] = []
+        failures = 0
+        with ThreadPoolExecutor(max_workers=12, thread_name_prefix="finmate-breadth") as executor:
+            futures = [executor.submit(load_page, page) for page in pages]
+            for future in as_completed(futures):
+                try:
+                    rows.extend(future.result())
+                except (requests.RequestException, ValueError):
+                    failures += 1
+        unique = {str(row.get("symbol") or row.get("code")): row for row in rows}
+        if failures or len(unique) < max(100, int(total * 0.95)):
+            raise MarketProviderError(
+                f"A-share breadth incomplete: {len(unique)}/{total} rows, {failures} failed pages"
+            )
+        changes: list[tuple[str, str, float]] = []
+        for row in unique.values():
+            try:
+                change = float(row["changepercent"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            changes.append((str(row.get("code") or ""), str(row.get("name") or ""), change))
+        advancers = sum(change > 0 for _, _, change in changes)
+        decliners = sum(change < 0 for _, _, change in changes)
+        unchanged = len(changes) - advancers - decliners
+        directional = max(advancers + decliners, 1)
+        return MarketPulseMetrics(
+            advancers=advancers,
+            decliners=decliners,
+            unchanged=unchanged,
+            limit_up=sum(_is_at_limit(code, name, change, True) for code, name, change in changes),
+            limit_down=sum(_is_at_limit(code, name, change, False) for code, name, change in changes),
+            sentiment_score=round(advancers / directional * 100, 1),
+        ), datetime.now(SHANGHAI)
+
+    def market_news(self, limit: int = 12) -> list[MarketNewsItem]:
+        payload = self._json(SINA_NEWS_URL, {
+            "pageid": 153,
+            "lid": 2516,
+            "num": min(max(limit * 3, 20), 60),
+            "page": 1,
+        }, referer="https://finance.sina.com.cn/stock/", attempts=1, timeout=5)
+        rows = ((payload.get("result") or {}).get("data") or [])
+        result: list[MarketNewsItem] = []
+        seen: set[str] = set()
+        for row in rows:
+            headline = _clean_news_text(row.get("title"))
+            news_id = str(row.get("docid") or row.get("oid") or headline)
+            if not headline or news_id in seen:
+                continue
+            seen.add(news_id)
+            try:
+                published_at = datetime.fromtimestamp(int(row.get("ctime") or 0), SHANGHAI)
+            except (TypeError, ValueError, OSError):
+                published_at = datetime.now(SHANGHAI)
+            summary = _clean_news_text(row.get("intro") or row.get("summary"))
+            result.append(MarketNewsItem(
+                news_id=news_id,
+                headline=headline,
+                summary=(summary or headline)[:260],
+                source=str(row.get("media_name") or "新浪财经"),
+                published_at=published_at,
+                url=str(row.get("url") or "") or None,
+            ))
+            if len(result) >= limit:
+                break
+        if not result:
+            raise MarketProviderError("No usable market news was returned")
+        return result
 
     def industry_sectors(self) -> list[SectorSnapshot]:
         """Load one aggregate row per Shenwan industry without crawling constituents."""
@@ -335,10 +529,11 @@ class EastmoneyStockProvider:
         return [stock for stock in stocks if stock is not None][:limit], total
 
     def _sina_market_leaders(self, limit: int) -> tuple[list[StockQuote], int]:
-        rows: list[dict[str, Any]] = []
         page_size = 100
-        for page in range(1, (limit + page_size - 1) // page_size + 1):
-            payload = self._json_once(SINA_RANK_URL, {
+        page_count = (limit + page_size - 1) // page_size
+
+        def load_page(page: int):
+            return self._json_once(SINA_RANK_URL, {
                 "page": page,
                 "num": page_size,
                 "sort": "amount",
@@ -347,16 +542,22 @@ class EastmoneyStockProvider:
                 "symbol": "",
                 "_s_r_a": "page",
             }, referer="https://finance.sina.com.cn/")
-            if not isinstance(payload, list) or not payload:
-                break
-            rows.extend(payload)
-        try:
-            count_payload = self._json_once(
-                SINA_COUNT_URL, {"node": "hs_a"}, referer="https://finance.sina.com.cn/"
+
+        rows: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=page_count + 1, thread_name_prefix="finmate-map-rank") as executor:
+            page_futures = [executor.submit(load_page, page) for page in range(1, page_count + 1)]
+            count_future = executor.submit(
+                self._json_once, SINA_COUNT_URL, {"node": "hs_a"},
+                "https://finance.sina.com.cn/",
             )
-            total = int(count_payload)
-        except (MarketProviderError, TypeError, ValueError):
-            total = len(rows)
+            for future in page_futures:
+                payload = future.result()
+                if isinstance(payload, list):
+                    rows.extend(payload)
+            try:
+                total = int(count_future.result())
+            except (MarketProviderError, TypeError, ValueError):
+                total = len(rows)
         stocks = [_sina_rank_quote(row) for row in rows]
         return [stock for stock in stocks if stock is not None][:limit], total
 
@@ -629,6 +830,17 @@ def _tencent_quotes(text: str) -> list[StockQuote]:
             market_cap_billion_cny=max(0.0, _float(parts[45])),
         ))
     return quotes
+
+
+def _is_at_limit(code: str, name: str, change: float, upper: bool) -> bool:
+    normalized_name = name.upper()
+    if "ST" in normalized_name:
+        threshold = 4.8
+    elif code.startswith(("300", "301", "688", "689", "8", "4", "92")):
+        threshold = 19.8
+    else:
+        threshold = 9.8
+    return change >= threshold if upper else change <= -threshold
 
 
 def _eastmoney_rank_quote(row: dict[str, Any]) -> StockQuote | None:

@@ -6,12 +6,14 @@ import {
   Building2,
   Clock3,
   Database,
-  Globe2,
   LayoutGrid,
+  Menu,
   MessageCircle,
+  Moon,
   Orbit,
   RefreshCw,
   Search,
+  Sun,
   TrendingDown,
   TrendingUp,
   UserRound,
@@ -19,27 +21,32 @@ import {
   X,
 } from "lucide-react";
 
-import { getIndustrySectors, getLiveQuotes, getMarketOverview, getSectorDetail, getStockDetail, searchStocks } from "./api";
+import { getIndustrySectors, getLiveQuotes, getMarketNews, getMarketOverview, getMarketPulse, getSectorDetail, getStockDetail, saveUserProfile, searchStocks } from "./api";
 import { AgentPanel } from "./components/AgentPanel";
-import { LimitBoard } from "./components/LimitBoard";
 import { MarketMap } from "./components/MarketMap";
 import type { MarketEntityMode } from "./components/MarketMap";
 import { MarketHeatmap } from "./components/MarketHeatmap";
+import { MarketNews } from "./components/MarketNews";
 import { PaperTrading } from "./components/PaperTrading";
 import { StockPanel } from "./components/StockPanel";
 import { StockExplorer } from "./components/StockExplorer";
 import { UserProfile } from "./components/UserProfile";
-import { getLimitStocks } from "./marketLimits";
 import { loadUserProfile, updateProfileFromConversation, type UserProfileData } from "./userProfile";
-import type { IndexQuote, MarketOverview, SectorSnapshot, StockDetail, StockQuote, StockSearchItem } from "./types";
+import { getClientIdentity } from "./identity";
+import type { IndexQuote, MarketNewsItem, MarketOverview, MarketPulse, SectorSnapshot, StockDetail, StockQuote, StockSearchItem } from "./types";
 
 function App() {
+  const [{ clientId }] = useState(getClientIdentity);
   const [overview, setOverview] = useState<MarketOverview | null>(null);
+  const [pulse, setPulse] = useState<MarketPulse | null>(null);
+  const [news, setNews] = useState<MarketNewsItem[]>([]);
   const [selected, setSelected] = useState<StockQuote | null>(null);
   const [selectedSectorName, setSelectedSectorName] = useState<string | null>(null);
   const [sectorDetail, setSectorDetail] = useState<SectorSnapshot | null>(null);
   const [detail, setDetail] = useState<StockDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [pulseLoading, setPulseLoading] = useState(true);
+  const [newsLoading, setNewsLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -48,11 +55,15 @@ function App() {
   const [explorerSymbol, setExplorerSymbol] = useState<string | null>(null);
   const [liveObservedAt, setLiveObservedAt] = useState<string | null>(null);
   const [liveError, setLiveError] = useState(false);
-  const [activeSection, setActiveSection] = useState<"market" | "analysis" | "profile">("market");
+  const [activeSection, setActiveSection] = useState<"market" | "map" | "analysis" | "profile">("market");
+  const [mapRequested, setMapRequested] = useState(false);
   const [paperOpen, setPaperOpen] = useState(false);
-  const [limitOpen, setLimitOpen] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfileData>(loadUserProfile);
   const [clock, setClock] = useState(() => new Date());
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    try { return localStorage.getItem("finmate.theme") === "light" ? "light" : "dark"; }
+    catch { return "dark"; }
+  });
   const [entityMode, setEntityMode] = useState<MarketEntityMode>(() => {
     try { return localStorage.getItem("finmate.market-entity") === "sectors" ? "sectors" : "stocks"; }
     catch { return "stocks"; }
@@ -67,10 +78,26 @@ function App() {
     try { localStorage.setItem("finmate.market-view", mode); } catch { /* Storage can be disabled. */ }
   };
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    try { localStorage.setItem("finmate.theme", theme); } catch { /* Storage can be disabled. */ }
+  }, [theme]);
+
   const changeEntityMode = (mode: MarketEntityMode) => {
     setEntityMode(mode);
     if (mode === "sectors") setQuery("");
     try { localStorage.setItem("finmate.market-entity", mode); } catch { /* Storage can be disabled. */ }
+  };
+
+  const persistUserProfile = async (next: UserProfileData) => {
+    const result = await saveUserProfile(clientId, next);
+    setUserProfile(next);
+    return result.quota;
+  };
+
+  const persistInferredProfile = (next: UserProfileData) => {
+    setUserProfile(next);
   };
 
   const marketSession = useMemo(() => getMarketSession(clock), [clock]);
@@ -82,7 +109,7 @@ function App() {
 
   useEffect(() => {
     const updateActiveSection = () => {
-      const sections = ["market", "analysis", "profile"] as const;
+      const sections = ["market", "map", "analysis", "profile"] as const;
       const current = sections.reduce<(typeof sections)[number]>((active, id) => {
         const section = document.getElementById(id);
         return section && section.getBoundingClientRect().top <= window.innerHeight * 0.42 ? id : active;
@@ -92,7 +119,7 @@ function App() {
     updateActiveSection();
     window.addEventListener("scroll", updateActiveSection, { passive: true });
     return () => window.removeEventListener("scroll", updateActiveSection);
-  }, [overview]);
+  }, [overview, pulse]);
 
   useEffect(() => {
     try { localStorage.setItem("finmate.user-profile.v1", JSON.stringify(userProfile)); }
@@ -104,25 +131,71 @@ function App() {
     setError(null);
     try {
       const result = await getMarketOverview(refresh);
-      setOverview(result);
+      setOverview((current) => pulse
+        ? mergePulseIntoOverview(result, pulse)
+        : current ? mergePulseIntoOverview(result, current) : result);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "市场数据加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [pulse]);
 
   useEffect(() => {
-    void loadOverview();
-  }, [loadOverview]);
+    let active = true;
+    const load = async () => {
+      setPulseLoading(true);
+      try {
+        const result = await getMarketPulse();
+        if (!active) return;
+        setPulse(result);
+        setOverview((current) => current
+          ? mergePulseIntoOverview(current, result)
+          : pulseToOverview(result));
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : "市场脉搏加载失败");
+      } finally {
+        if (active) setPulseLoading(false);
+      }
+    };
+    void load();
+    void getMarketNews("", 36).then((items) => { if (active) setNews(items); })
+      .catch(() => { if (active) setNews([]); })
+      .finally(() => { if (active) setNewsLoading(false); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.hidden) return;
+      void getMarketPulse().then((result) => {
+        setPulse(result);
+        setOverview((current) => current ? mergePulseIntoOverview(current, result) : pulseToOverview(result));
+      }).catch(() => undefined);
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (mapRequested) return;
+    const requestAfterScroll = () => {
+      if (window.scrollY >= 180) setMapRequested(true);
+    };
+    window.addEventListener("scroll", requestAfterScroll, { passive: true });
+    return () => window.removeEventListener("scroll", requestAfterScroll);
+  }, [mapRequested]);
+
+  useEffect(() => {
+    if (mapRequested && !overview?.sectors.length && !loading) void loadOverview();
+  }, [loadOverview, loading, mapRequested, overview?.sectors.length]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden || !mapRequested) return;
       void getMarketOverview(true).then(setOverview).catch(() => undefined);
     }, 300_000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [mapRequested]);
 
   const watchSymbols = useMemo(
     () => overview?.sectors.flatMap((sector) => sector.stocks.map((stock) => stock.symbol)).join(",") ?? "",
@@ -214,17 +287,21 @@ function App() {
   const filteredOverview = useMemo(() => {
     if (!overview || !query.trim()) return overview;
     const normalized = query.trim().toLowerCase();
+    const seenSymbols = new Set<string>();
     return {
       ...overview,
       sectors: overview.sectors
         .map((sector) => ({
           ...sector,
-          stocks: sector.stocks.filter(
-            (stock) =>
+          stocks: sector.stocks.filter((stock) => {
+            const matches =
               stock.name.toLowerCase().includes(normalized) ||
               stock.symbol.toLowerCase().includes(normalized) ||
-              stock.sector.toLowerCase().includes(normalized),
-          ),
+              stock.sector.toLowerCase().includes(normalized);
+            if (!matches || seenSymbols.has(stock.symbol)) return false;
+            seenSymbols.add(stock.symbol);
+            return true;
+          }),
         }))
         .filter((sector) => sector.stocks.length > 0),
     };
@@ -306,7 +383,6 @@ function App() {
   };
 
   const displayOverview = entityMode === "sectors" ? industryOverview : filteredOverview;
-  const limitStocks = useMemo(() => overview ? getLimitStocks(overview) : { up: [], down: [] }, [overview]);
   const marketTitle = entityMode === "stocks"
     ? mapMode === "bubbles" ? "个股涨跌碰撞云图" : "个股行情云图"
     : mapMode === "bubbles" ? "概念板块涨跌碰撞云图" : "概念板块行情云图";
@@ -322,6 +398,9 @@ function App() {
           <a className={"nav-link" + (activeSection === "market" ? " nav-link--active" : "")} href="#market" onClick={() => setActiveSection("market")}>
             <Activity size={14} />市场脉搏
           </a>
+          <a className={"nav-link" + (activeSection === "map" ? " nav-link--active" : "")} href="#map" onClick={() => { setActiveSection("map"); setMapRequested(true); }}>
+            <Orbit size={14} />大盘云图
+          </a>
           <a className={"nav-link" + (activeSection === "analysis" ? " nav-link--active" : "")} href="#analysis" onClick={() => setActiveSection("analysis")}>
             <MessageCircle size={14} />HeyFinmate
           </a>
@@ -335,11 +414,38 @@ function App() {
             type="button"
             title="刷新市场数据"
             aria-label="刷新市场数据"
-            disabled={loading}
-            onClick={() => void loadOverview(true)}
+            disabled={pulseLoading || loading}
+            onClick={() => {
+              setPulseLoading(true);
+              void getMarketPulse(true).then((result) => {
+                setPulse(result);
+                setOverview((current) => current ? mergePulseIntoOverview(current, result) : pulseToOverview(result));
+              }).catch(() => setError("市场脉搏刷新失败")).finally(() => setPulseLoading(false));
+              setNewsLoading(true);
+              void getMarketNews("", 36).then(setNews).catch(() => setNews([])).finally(() => setNewsLoading(false));
+              if (mapRequested) void loadOverview(true);
+            }}
           >
             <RefreshCw className={loading ? "spin" : ""} size={18} />
           </button>
+          <details className="options-menu">
+            <summary className="icon-button" role="button" title="功能选项" aria-label="打开功能选项">
+              <Menu size={18} />
+            </summary>
+            <div className="options-popover">
+              <span>功能选项</span>
+              <div className="theme-picker" role="group" aria-label="主题色">
+                <button type="button" aria-pressed={theme === "dark"} onClick={(event) => {
+                  setTheme("dark");
+                  event.currentTarget.closest("details")?.removeAttribute("open");
+                }}><Moon size={15} />深色</button>
+                <button type="button" aria-pressed={theme === "light"} onClick={(event) => {
+                  setTheme("light");
+                  event.currentTarget.closest("details")?.removeAttribute("open");
+                }}><Sun size={15} />浅色</button>
+              </div>
+            </div>
+          </details>
         </div>
       </header>
 
@@ -361,16 +467,14 @@ function App() {
         <section className="market-header" id="market">
           <div>
             <span className="eyebrow">CHINA A-SHARE MARKET</span>
-            <h1>实时大盘云图</h1>
-            <p>用涨跌方向、波动幅度与板块聚集观察当前市场结构</p>
+            <h1>市场脉搏</h1>
+            <p>实时指数、全市场宽度、涨跌停与影响市场的最新信息</p>
           </div>
-          {overview && (
-            <div className={"timestamp market-session market-session--" + marketSession.tone}>
-              <Clock3 size={15} />
-              <span>北京时间 {formatMarketTime(clock.toISOString())}</span>
-              <strong>{marketSession.label}</strong>
-            </div>
-          )}
+          <div className={"timestamp market-session market-session--" + marketSession.tone}>
+            <Clock3 size={15} />
+            <span>北京时间 {formatMarketTime(clock.toISOString())}</span>
+            <strong>{marketSession.label}</strong>
+          </div>
         </section>
 
         {error && (
@@ -386,36 +490,43 @@ function App() {
           </div>
         )}
 
-        {loading && !overview ? (
+        {pulseLoading && !overview ? (
           <MarketSkeleton />
         ) : overview && filteredOverview && displayOverview ? (
           <>
-            {overview.provenance.fallback_reason && (
+            {overview.sectors.length > 0 && overview.provenance.fallback_reason && (
               <div className="data-notice">
                 <Database size={16} />
-                <span>实时行情暂不可用，当前显示最近一次可用行情。</span>
+                <span>云图行情源暂不可用，当前云图为演示结构，不作为实时行情。</span>
               </div>
             )}
 
-            <section className="index-board" aria-label="A 股及全球参考指数">
-              <IndexRow label="A 股指数" indices={overview.indices} />
-              <IndexRow label="全球参考" indices={overview.reference_indices} icon={<Globe2 size={14} />} compact />
+            <section className="index-board" aria-label="A 股指数">
+              <IndexRow label="A 股指数" indices={pulse?.indices ?? overview.indices} />
             </section>
 
             <section className="metric-strip" aria-label="市场指标">
-              <Metric label="活跃池上涨" value={`${overview.metrics.advancers} 家`} tone="up" icon={<TrendingUp size={17} />} />
-              <Metric label="活跃池下跌" value={`${overview.metrics.decliners} 家`} tone="down" icon={<TrendingDown size={17} />} />
+              <Metric label="全市场上涨" value={formatCount(pulse?.metrics.advancers, pulse?.breadth_status)} tone="up" icon={<TrendingUp size={17} />} />
+              <Metric label="全市场下跌" value={formatCount(pulse?.metrics.decliners, pulse?.breadth_status)} tone="down" icon={<TrendingDown size={17} />} />
               <Metric
                 label="涨停 / 跌停"
-                value={`${limitStocks.up.length} / ${limitStocks.down.length}`}
-                onClick={() => setLimitOpen(true)}
+                value={formatLimits(pulse)}
               />
-              <Metric label="成交额" value={`¥${(overview.metrics.turnover_billion_cny * 10).toFixed(1)} 亿`} />
-              <Metric label="市场情绪" value={`${overview.metrics.sentiment_score.toFixed(0)} / 100`} tone={overview.metrics.sentiment_score >= 50 ? "up" : "down"} />
+              <Metric label="成交额" value={formatTurnover(pulse?.metrics.turnover_billion_cny)} />
+              <Metric label="市场情绪" value={pulse?.metrics.sentiment_score == null ? statusPlaceholder(pulse?.breadth_status) : `${pulse.metrics.sentiment_score.toFixed(0)} / 100`} tone={(pulse?.metrics.sentiment_score ?? 50) >= 50 ? "up" : "down"} />
             </section>
 
-            <section className={selected || selectedSectorName ? "workspace" : "workspace workspace--map-only"}>
+            <MarketNews items={news} loading={newsLoading} />
+
+            <section id="map" className={selected || selectedSectorName ? "workspace" : "workspace workspace--map-only"}>
               <div className="map-area">
+                {!mapRequested || (loading && overview.sectors.length === 0) ? (
+                  <button className="map-load-card" type="button" onClick={() => setMapRequested(true)}>
+                    <Orbit size={24} />
+                    <strong>{loading ? "正在生成大盘云图…" : "查看大盘云图"}</strong>
+                    <span>进入这里或点击后才读取成交额排行与板块数据，不阻塞首页。</span>
+                  </button>
+                ) : <>
                 <div className="section-heading">
                   <div>
                     <span className="section-kicker">MARKET PULSE</span>
@@ -472,6 +583,7 @@ function App() {
                   {displayOverview.sectors.length ? (
                     mapMode === "bubbles" ? <MarketMap
                       overview={displayOverview}
+                      theme={theme}
                       entityMode={entityMode}
                       selectedSymbol={selected?.symbol ?? null}
                       selectedSector={selectedSectorName ?? selected?.sector ?? null}
@@ -504,6 +616,7 @@ function App() {
                   <span><i className="legend-dot legend-dot--up" />上涨</span>
                   <span><i className="legend-dot legend-dot--down" />下跌</span>
                 </div>
+                </>}
               </div>
 
               {(selected || selectedSectorName) && selectedSector && (
@@ -520,21 +633,22 @@ function App() {
               )}
             </section>
 
-            <AgentPanel onConversation={(question) => {
-              setUserProfile((current) => updateProfileFromConversation(current, question));
-            }} />
-            <UserProfile profile={userProfile} onChange={setUserProfile} />
-
-            <footer className="app-footer">
-              <span>行情每 3 秒自动更新</span>
-              <span>FinMate 研究辅助，不构成投资建议</span>
-            </footer>
           </>
         ) : null}
+
+        <AgentPanel onConversation={(question) => {
+          const next = updateProfileFromConversation(userProfile, question);
+          if (next !== userProfile) persistInferredProfile(next);
+        }} />
+        <UserProfile clientId={clientId} profile={userProfile} onChange={persistUserProfile} />
+
+        <footer className="app-footer">
+          <span>指数 15 秒刷新 · 全市场统计后台校验 · 云图按需加载</span>
+          <span>FinMate 研究辅助，不构成投资建议</span>
+        </footer>
       </main>
       {explorerSymbol && <StockExplorer symbol={explorerSymbol} initialQuote={selected?.symbol === explorerSymbol ? selected : undefined} onClose={() => setExplorerSymbol(null)} />}
-      <PaperTrading open={paperOpen} onClose={() => setPaperOpen(false)} />
-      {overview && <LimitBoard open={limitOpen} overview={overview} onClose={() => setLimitOpen(false)} onSelectStock={chooseStock} />}
+      <PaperTrading open={paperOpen} clientId={clientId} onClose={() => setPaperOpen(false)} />
     </div>
   );
 }
@@ -582,6 +696,52 @@ function MarketSkeleton() {
 
 function formatSigned(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function statusPlaceholder(status: MarketPulse["breadth_status"] | undefined) {
+  return status === "unavailable" ? "暂不可用" : "统计中";
+}
+
+function formatCount(value: number | null | undefined, status: MarketPulse["breadth_status"] | undefined) {
+  return value == null ? statusPlaceholder(status) : `${value} 家`;
+}
+
+function formatLimits(pulse: MarketPulse | null) {
+  const up = pulse?.metrics.limit_up;
+  const down = pulse?.metrics.limit_down;
+  return up == null || down == null ? statusPlaceholder(pulse?.breadth_status) : `${up} / ${down}`;
+}
+
+function formatTurnover(value: number | null | undefined) {
+  if (value == null) return "暂不可用";
+  const yi = value * 10;
+  return yi >= 10_000 ? `¥${(yi / 10_000).toFixed(2)} 万亿` : `¥${Math.round(yi).toLocaleString("zh-CN")} 亿`;
+}
+
+function pulseToOverview(pulse: MarketPulse): MarketOverview {
+  return {
+    market: pulse.market,
+    indices: pulse.indices,
+    reference_indices: [],
+    metrics: {
+      advancers: pulse.metrics.advancers ?? 0,
+      decliners: pulse.metrics.decliners ?? 0,
+      unchanged: pulse.metrics.unchanged ?? 0,
+      limit_up: pulse.metrics.limit_up ?? 0,
+      limit_down: pulse.metrics.limit_down ?? 0,
+      turnover_billion_cny: pulse.metrics.turnover_billion_cny ?? 0,
+      sentiment_score: pulse.metrics.sentiment_score ?? 50,
+    },
+    sectors: [],
+    industry_sectors: [],
+    provenance: pulse.provenance,
+  };
+}
+
+function mergePulseIntoOverview(overview: MarketOverview, pulse: MarketPulse | MarketOverview): MarketOverview {
+  if (!("breadth_status" in pulse)) return overview;
+  const top = pulseToOverview(pulse);
+  return { ...overview, indices: top.indices, metrics: top.metrics };
 }
 
 function formatMarketTime(value: string): string {

@@ -1,10 +1,14 @@
-import { Save, ShieldCheck, UserRound } from "lucide-react";
+import { CheckCircle2, ChevronDown, Pencil, Save, ShieldCheck, UserRound } from "lucide-react";
+import { FormEvent, useEffect, useState } from "react";
 
+import { ApiError, getDailyQuota } from "../api";
+import type { DailyQuotaStatus } from "../types";
 import type { UserProfileData } from "../userProfile";
 
 interface Props {
+  clientId: string;
   profile: UserProfileData;
-  onChange: (profile: UserProfileData) => void;
+  onChange: (profile: UserProfileData) => Promise<DailyQuotaStatus>;
 }
 
 const FIELDS = [
@@ -17,9 +21,45 @@ const FIELDS = [
   { key: "liquidity", label: "资金流动性需求", options: ["较高", "适中", "较低"] },
 ] as const;
 
-export function UserProfile({ profile, onChange }: Props) {
+export function UserProfile({ clientId, profile, onChange }: Props) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(profile);
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [quotaRemaining, setQuotaRemaining] = useState<number | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => { if (!editing) setDraft(profile); }, [editing, profile]);
+
+  useEffect(() => {
+    let active = true;
+    void getDailyQuota(clientId)
+      .then((value) => { if (active) setQuotaRemaining(value.profile_remaining); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [clientId]);
+
   const change = (key: keyof UserProfileData, value: string) => {
-    onChange({ ...profile, [key]: value, updatedAt: new Date().toISOString() });
+    setDraft((current) => ({ ...current, [key]: value }));
+    setSaved(false);
+  };
+
+  const submit = async (event?: FormEvent) => {
+    event?.preventDefault();
+    if (saving || quotaRemaining === 0) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const quota = await onChange({ ...draft, updatedAt: new Date().toISOString() });
+      setQuotaRemaining(quota.profile_remaining);
+      setEditing(false);
+      setSaved(true);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "daily_profile_limit") setQuotaRemaining(0);
+      setSaveError(reason instanceof Error ? reason.message : "用户画像保存失败");
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <section className="user-profile" id="profile">
@@ -28,9 +68,27 @@ export function UserProfile({ profile, onChange }: Props) {
           <span><UserRound size={19} /></span>
           <div><h2>用户画像</h2><p>让 FinMate 更了解你的投资背景与关注方向</p></div>
         </div>
-        <div className="profile-local"><ShieldCheck size={14} />仅保存在当前浏览器</div>
+        <div className="profile-heading-actions">
+          {saved && <span className="profile-saved" role="status"><CheckCircle2 size={14} />已更新用户画像</span>}
+          <div className="profile-local"><ShieldCheck size={14} />本机保存</div>
+          <button className="profile-edit-button" type="button" disabled={quotaRemaining === 0 && !editing} aria-expanded={editing} onClick={() => { setEditing((value) => !value); setSaved(false); setSaveError(null); }}>
+            {editing ? <ChevronDown size={15} /> : <Pencil size={14} />}{editing ? "收起编辑" : "修改用户画像"}
+          </button>
+        </div>
       </div>
+      <p className="quota-note">
+        每天最多修改 2 次用户画像
+        {quotaRemaining != null && <> · 今日剩余 {quotaRemaining} 次</>}
+      </p>
+      {saveError && <p className="profile-save-error" role="alert">{saveError}</p>}
 
+      {!editing ? (
+        <div className="profile-summary" aria-label="用户画像摘要">
+          <span>{profile.risk}型</span><span>{profile.horizon}</span><span>{profile.goal}</span>
+          {profile.interests.slice(0, 4).map((topic) => <span key={topic}>{topic}</span>)}
+          {!profile.updatedAt && <small>尚未保存完整画像</small>}
+        </div>
+      ) : <form className="profile-editor" onSubmit={(event) => void submit(event)}>
       <div className="profile-grid">
         {FIELDS.map((field) => (
           <fieldset key={field.key}>
@@ -40,7 +98,7 @@ export function UserProfile({ profile, onChange }: Props) {
                 <button
                   key={option}
                   type="button"
-                  aria-pressed={profile[field.key] === option}
+                  aria-pressed={draft[field.key] === option}
                   onClick={() => change(field.key, option)}
                 >
                   {option}
@@ -56,11 +114,19 @@ export function UserProfile({ profile, onChange }: Props) {
           <span>补充说明</span>
           <small>可补充资金用途、明确禁忌、偏好行业、持仓周期或你希望 FinMate 记住的背景。</small>
           <textarea
-            value={profile.supplement}
+            value={draft.supplement}
             onChange={(event) => change("supplement", event.target.value)}
             placeholder="例如：更关注长期基本面，不接受高杠杆，希望优先解释风险与估值。"
             maxLength={500}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void submit();
+              }
+            }}
           />
+          <small>按 Enter 保存，Shift + Enter 换行</small>
+          <button className="profile-submit" type="submit" disabled={saving || quotaRemaining === 0}><Save size={15} />{saving ? "保存中" : "保存用户画像"}</button>
         </label>
         <aside>
           <span>近期关注</span>
@@ -72,6 +138,7 @@ export function UserProfile({ profile, onChange }: Props) {
           <p><Save size={13} />结构化信息由你主动填写；对话只更新明确出现的关注主题。</p>
         </aside>
       </div>
+      </form>}
     </section>
   );
 }

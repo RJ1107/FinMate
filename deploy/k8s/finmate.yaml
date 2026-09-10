@@ -18,6 +18,88 @@ data:
   OPENROUTER_FALLBACK_MODEL: deepseek/deepseek-v3.2
   OPENROUTER_HTTP_REFERER: https://heyfinmate.com
   OPENROUTER_APP_TITLE: FinMate
+  DATABASE_HOST: finmate-postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: finmate
+  DATABASE_USER: finmate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: finmate-postgres
+  namespace: finmate
+spec:
+  clusterIP: None
+  selector:
+    app: finmate-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: finmate-postgres
+  namespace: finmate
+spec:
+  serviceName: finmate-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: finmate-postgres
+  template:
+    metadata:
+      labels:
+        app: finmate-postgres
+    spec:
+      securityContext:
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: finmate
+            - name: POSTGRES_USER
+              value: finmate
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: finmate-secrets
+                  key: DATABASE_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "finmate", "-d", "finmate"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "finmate", "-d", "finmate"]
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
 ---
 apiVersion: apps/v1
 kind: Deployment

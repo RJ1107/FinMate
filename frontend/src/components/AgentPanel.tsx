@@ -1,22 +1,25 @@
 import { FormEvent, useEffect, useState } from "react";
 import { CheckCircle2, CircleDot, MessageCircle, Send } from "lucide-react";
 
-import { getAgentStatus, queryAgent } from "../api";
+import { ApiError, getAgentStatus, getDailyQuota, queryAgent } from "../api";
+import { getClientIdentity } from "../identity";
 import type { AgentAnswer, AgentStatus } from "../types";
 
-const examples = ["今天市场怎么样？", "宁德时代表现如何？", "中芯国际今天涨了多少？"];
+const examples = ["今天市场怎么样？", "宁德时代表现如何？", "结合我的画像，10 万元如何配置？"];
 
 interface Props {
   onConversation?: (question: string, answer: AgentAnswer) => void;
 }
 
 export function AgentPanel({ onConversation }: Props) {
+  const [{ clientId, conversationId }] = useState(getClientIdentity);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<AgentAnswer | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
+  const [quotaRemaining, setQuotaRemaining] = useState<number | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -24,6 +27,14 @@ export function AgentPanel({ onConversation }: Props) {
       .catch(() => { if (active) setStatusError(true); });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void getDailyQuota(clientId)
+      .then((value) => { if (active) setQuotaRemaining(value.agent_remaining); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [clientId]);
 
   const modelName = (model: string | null | undefined) => model?.toLowerCase().includes("deepseek")
     ? "DeepSeek" : model?.toLowerCase().includes("qwen") ? "Qwen" : model?.split("/").pop() ?? "大模型";
@@ -36,14 +47,16 @@ export function AgentPanel({ onConversation }: Props) {
   const submit = async (event?: FormEvent) => {
     event?.preventDefault();
     const normalized = question.trim();
-    if (normalized.length < 2 || loading) return;
+    if (normalized.length < 2 || loading || quotaRemaining === 0) return;
     setLoading(true);
     setError(null);
     try {
-      const result = await queryAgent(normalized);
+      const result = await queryAgent(normalized, clientId, conversationId);
       setAnswer(result);
+      if (result.daily_remaining != null) setQuotaRemaining(result.daily_remaining);
       onConversation?.(normalized, result);
     } catch (reason) {
+      if (reason instanceof ApiError && reason.code === "daily_agent_limit") setQuotaRemaining(0);
       setError(reason instanceof Error ? reason.message : "分析请求失败");
     } finally {
       setLoading(false);
@@ -80,11 +93,15 @@ export function AgentPanel({ onConversation }: Props) {
             maxLength={500}
           />
         </label>
-        <button type="submit" disabled={question.trim().length < 2 || loading}>
+        <button type="submit" disabled={question.trim().length < 2 || loading || quotaRemaining === 0}>
           <Send size={16} />
           {loading ? "分析中" : "分析"}
         </button>
       </form>
+      <p className="quota-note">
+        每天最多 20 次 FinMate 对话
+        {quotaRemaining != null && <> · 今日剩余 {quotaRemaining} 次</>}
+      </p>
 
       <div className="example-row" aria-label="示例问题">
         {examples.map((example) => (
@@ -146,6 +163,8 @@ export function AgentPanel({ onConversation }: Props) {
 
 function intentLabel(intent: AgentAnswer["intent"]): string {
   if (intent === "market_summary") return "市场总览";
+  if (intent === "market_news") return "市场新闻 RAG";
   if (intent === "stock_snapshot") return "个股行情";
+  if (intent === "portfolio_allocation") return "资产配置";
   return "金融问答";
 }

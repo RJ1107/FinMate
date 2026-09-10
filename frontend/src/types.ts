@@ -37,6 +37,24 @@ export interface MarketMetrics {
   sentiment_score: number;
 }
 
+export interface MarketPulseMetrics {
+  advancers: number | null;
+  decliners: number | null;
+  unchanged: number | null;
+  limit_up: number | null;
+  limit_down: number | null;
+  turnover_billion_cny: number | null;
+  sentiment_score: number | null;
+}
+
+export interface MarketPulse {
+  market: string;
+  indices: IndexQuote[];
+  metrics: MarketPulseMetrics;
+  breadth_status: "ready" | "updating" | "unavailable";
+  provenance: Provenance;
+}
+
 export interface StockQuote {
   symbol: string;
   name: string;
@@ -127,12 +145,23 @@ export interface StockSeries {
   is_realtime: boolean;
 }
 
-export type AgentIntent = "market_summary" | "stock_snapshot" | "unknown";
+export type AgentIntent = "market_summary" | "market_news" | "stock_snapshot" | "portfolio_allocation" | "unknown";
 
 export interface AgentStatus {
   configured: boolean;
   provider: string | null;
   model: string | null;
+}
+
+export interface DailyQuotaStatus {
+  client_id: string;
+  usage_date: string;
+  agent_used: number;
+  agent_limit: number;
+  agent_remaining: number;
+  profile_used: number;
+  profile_limit: number;
+  profile_remaining: number;
 }
 
 export interface AgentEvidence {
@@ -162,4 +191,6 @@ export interface AgentAnswer {
   observed_at: string;
   answer_mode: "deterministic" | "model";
   model: string | null;
+  daily_remaining: number | null;
+  daily_limit: number;
 }

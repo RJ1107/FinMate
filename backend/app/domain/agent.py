@@ -8,12 +8,16 @@ from app.domain.models import DataMode
 
 class AgentIntent(StrEnum):
     MARKET_SUMMARY = "market_summary"
+    MARKET_NEWS = "market_news"
     STOCK_SNAPSHOT = "stock_snapshot"
+    PORTFOLIO_ALLOCATION = "portfolio_allocation"
     UNKNOWN = "unknown"
 
 
 class AgentQuery(BaseModel):
     question: str = Field(min_length=2, max_length=500)
+    client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+    conversation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
 
 
 class AgentStatus(BaseModel):
@@ -49,3 +53,5 @@ class AgentAnswer(BaseModel):
     observed_at: datetime
     answer_mode: str = "deterministic"
     model: str | None = None
+    daily_remaining: int | None = None
+    daily_limit: int = 20

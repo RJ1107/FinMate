@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     app_port: int = 8000
     market_provider: str = "auto"
     market_cache_ttl_seconds: int = 60
+    database_host: str = "127.0.0.1"
+    database_port: int = 5432
+    database_name: str = "finmate"
+    database_user: str = "finmate"
+    database_password: SecretStr = SecretStr("finmate-local")
     cors_origins: str = "http://localhost:5173,http://localhost:8080"
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
@@ -33,6 +38,13 @@ class Settings(BaseSettings):
     @property
     def openrouter_configured(self) -> bool:
         return bool(self.openrouter_api_key and self.openrouter_api_key.get_secret_value().strip())
+
+    @property
+    def database_dsn(self) -> str:
+        return (
+            f"host={self.database_host} port={self.database_port} dbname={self.database_name} "
+            f"user={self.database_user} password={self.database_password.get_secret_value()}"
+        )
 
 
 @lru_cache

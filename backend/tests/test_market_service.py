@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from app.domain.models import (
     Candle,
     DataMode,
+    IndexQuote,
     QuoteBatch,
     StockProfile,
     StockQuote,
@@ -138,3 +139,66 @@ def test_realtime_overview_overlays_quotes_and_marks_sample_live() -> None:
     assert overview.provenance.source == "test-live"
     assert overview.metrics.advancers + overview.metrics.decliners + overview.metrics.unchanged >= 100
     assert provider.quote_calls == 1
+
+def test_overview_persists_and_restores_last_live_snapshot() -> None:
+    class SnapshotStore:
+        payload = None
+
+        def upsert_market_snapshot(self, snapshot_key, payload, observed_at):
+            assert snapshot_key == "market-overview"
+            assert observed_at is not None
+            self.payload = payload
+
+        def get_market_snapshot(self, snapshot_key):
+            assert snapshot_key == "market-overview"
+            return self.payload
+
+    store = SnapshotStore()
+    live_service = MarketService(provider_name="auto", snapshot_store=store)
+    live_overview = live_service.demo_provider.get_market_overview()
+    live_overview.provenance.mode = DataMode.DELAYED
+
+    class WorkingProvider:
+        def get_market_overview(self):
+            return live_overview
+
+    live_service.live_provider = WorkingProvider()
+    live_service.get_overview()
+    assert store.payload is not None
+
+    fallback_service = MarketService(provider_name="auto", snapshot_store=store)
+    fallback_service.live_provider = BrokenProvider()
+    restored = fallback_service.get_overview()
+
+    assert restored.provenance.mode == DataMode.CACHED
+    assert restored.provenance.source == live_overview.provenance.source
+
+
+def test_failed_breadth_reports_unavailable_without_immediate_retry() -> None:
+    class FailingBreadthProvider:
+        def __init__(self):
+            self.breadth_calls = 0
+
+        def market_indices(self):
+            return (
+                [IndexQuote(
+                    symbol="000001", name="上证指数", price=3900,
+                    change_percent=0.1,
+                )],
+                1200.0,
+                datetime.now(UTC),
+            )
+
+        def market_breadth(self):
+            self.breadth_calls += 1
+            raise MarketProviderError("blocked")
+
+    provider = FailingBreadthProvider()
+    service = MarketService(provider_name="auto")
+    service.stock_provider = provider
+    service._refresh_breadth()
+
+    pulse = service.get_pulse()
+
+    assert pulse.breadth_status == "unavailable"
+    assert provider.breadth_calls == 1

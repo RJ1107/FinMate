@@ -63,6 +63,19 @@ INDEX_CODES = (
 )
 
 
+CURATED_EXTRA_SECTOR_STOCKS = (
+    ("基础化工", (("600309", "万华化学"), ("002601", "龙佰集团"), ("600426", "华鲁恒升"))),
+    ("建筑材料", (("600585", "海螺水泥"), ("002271", "东方雨虹"), ("000786", "北新建材"))),
+    ("石油石化", (("601857", "中国石油"), ("600028", "中国石化"), ("600938", "中国海油"))),
+    ("钢铁", (("600019", "宝钢股份"), ("000932", "华菱钢铁"), ("000709", "河钢股份"))),
+    ("建筑装饰", (("601668", "中国建筑"), ("601390", "中国中铁"), ("601800", "中国交建"))),
+    ("交通运输", (("002352", "顺丰控股"), ("601816", "京沪高铁"), ("601919", "中远海控"))),
+    ("商贸零售", (("601933", "永辉超市"), ("600859", "王府井"), ("600415", "小商品城"))),
+    ("农林牧渔", (("002714", "牧原股份"), ("300498", "温氏股份"), ("002311", "海大集团"))),
+    ("社会服务", (("601888", "中国中免"), ("600754", "锦江酒店"), ("300144", "宋城演艺"))),
+    ("美容护理", (("603605", "珀莱雅"), ("300896", "爱美客"), ("300957", "贝泰妮"))),
+    ("纺织服饰", (("600398", "海澜之家"), ("002563", "森马服饰"), ("600177", "雅戈尔"))),
+)
 class EastmoneyStockProvider:
     """On-demand A-share search, quote, profile and K-line adapter."""
 
@@ -77,6 +90,7 @@ class EastmoneyStockProvider:
 
     def get_market_overview(self, display_limit: int = 180) -> MarketOverview:
         """Select a readable turnover-ranked view from the full A-share universe."""
+        return self._curated_market_overview()
         def load_stocks():
             try:
                 return (*self._sina_market_leaders(display_limit), "sina-a-share-turnover-ranking")
@@ -126,8 +140,87 @@ class EastmoneyStockProvider:
             selection_method="全市场成交额前列",
         )
 
+    def _curated_market_overview(self) -> MarketOverview:
+        """Build the map from a stable curated universe and live Tencent quotes."""
+        from app.providers.demo import DemoMarketDataProvider
+
+        overview = DemoMarketDataProvider().get_market_overview().model_copy(deep=True)
+        overview.sectors.extend(
+            SectorSnapshot(
+                name=sector_name,
+                change_percent=0,
+                turnover_billion_cny=0,
+                stocks=[
+                    StockQuote(
+                        symbol=symbol, name=name, sector=sector_name, price=1,
+                        change_percent=0, turnover_million_cny=0,
+                    )
+                    for symbol, name in members
+                ],
+            )
+            for sector_name, members in CURATED_EXTRA_SECTOR_STOCKS
+        )
+        symbols = [
+            stock.symbol
+            for sector in overview.sectors
+            for stock in sector.stocks
+        ]
+        batch = self.quotes(symbols)
+        updates = {quote.symbol: quote for quote in batch.quotes}
+        if not updates:
+            raise MarketProviderError("Tencent returned no live quotes for the market map")
+
+        all_stocks: list[StockQuote] = []
+        refreshed_sectors: list[SectorSnapshot] = []
+        for sector in overview.sectors:
+            stocks = [
+                updates[stock.symbol].model_copy(update={"sector": sector.name})
+                for stock in sector.stocks
+                if stock.symbol in updates
+            ]
+            if not stocks:
+                continue
+            turnover = sum(stock.turnover_million_cny for stock in stocks)
+            weights = sum(max(stock.turnover_million_cny, 1) for stock in stocks)
+            refreshed_sectors.append(sector.model_copy(update={
+                "change_percent": round(sum(
+                    stock.change_percent * max(stock.turnover_million_cny, 1)
+                    for stock in stocks
+                ) / weights, 2),
+                "turnover_billion_cny": round(turnover / 1000, 2),
+                "stocks": stocks,
+            }))
+            all_stocks.extend(stocks)
+
+        advancers = sum(stock.change_percent > 0 for stock in all_stocks)
+        decliners = sum(stock.change_percent < 0 for stock in all_stocks)
+        unchanged = len(all_stocks) - advancers - decliners
+        overview.sectors = refreshed_sectors
+        overview.industry_sectors = []
+        overview.metrics = MarketMetrics(
+            advancers=advancers,
+            decliners=decliners,
+            unchanged=unchanged,
+            limit_up=sum(stock.change_percent >= 9.8 for stock in all_stocks),
+            limit_down=sum(stock.change_percent <= -9.8 for stock in all_stocks),
+            turnover_billion_cny=round(
+                sum(stock.turnover_million_cny for stock in all_stocks) / 1000, 2
+            ),
+            sentiment_score=round(advancers / max(advancers + decliners, 1) * 100, 1),
+        )
+        overview.provenance = Provenance(
+            source=batch.source,
+            mode=DataMode.LIVE,
+            observed_at=batch.observed_at,
+            retrieved_at=datetime.now(SHANGHAI),
+        )
+        overview.displayed_count = len(all_stocks)
+        overview.selection_method = "FinMate 核心样本 · 腾讯实时行情"
+        return overview
+
     def market_indices(self) -> tuple[list[IndexQuote], float, datetime]:
         """Fetch index quotes without loading and sorting the stock universe."""
+        return self._tencent_market_indices()
         try:
             text = self._text(
                 SINA_INDEX_URL + ",".join(item[0] for item in INDEX_CODES),
@@ -318,6 +411,7 @@ class EastmoneyStockProvider:
         ), datetime.now(SHANGHAI)
 
     def market_news(self, limit: int = 12) -> list[MarketNewsItem]:
+        return self._eastmoney_fast_news(limit)
         try:
             payload = self._json(SINA_NEWS_URL, {
                 "pageid": 153,

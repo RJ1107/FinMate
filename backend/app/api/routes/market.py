@@ -53,6 +53,9 @@ def market_news(
         request.app.state.memory_store.ingest_news(items)
         return items
     except MarketProviderError as exc:
+        cached = request.app.state.memory_store.recent_news(limit)
+        if cached:
+            return cached
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 

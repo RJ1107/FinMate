@@ -17,10 +17,12 @@ from app.services.memory import MemoryStore
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    app.state.memory_store = MemoryStore(settings.database_dsn)
+    memory_store = MemoryStore(settings.database_dsn)
+    app.state.memory_store = memory_store
     app.state.market_service = MarketService(
         provider_name=settings.market_provider,
         cache_ttl_seconds=settings.market_cache_ttl_seconds,
+        snapshot_store=memory_store,
     )
     answer_refiner = None
     if settings.openrouter_configured and settings.openrouter_api_key:

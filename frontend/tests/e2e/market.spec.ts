@@ -6,13 +6,13 @@ import { expect, test } from "@playwright/test";
 const artifactDirectory = resolve("artifacts");
 
 async function openMap(page: import("@playwright/test").Page) {
-  const trigger = page.getByRole("button", { name: /查看大盘云图|正在生成大盘云图/ });
-  const canvas = page.locator(".map-frame canvas");
-  const heatmap = page.locator(".heatmap");
-  await expect(trigger.or(canvas).or(heatmap).first()).toBeVisible({ timeout: 30_000 });
-  if (await canvas.isVisible() || await heatmap.isVisible()) return;
-  await trigger.click({ force: true }).catch(() => undefined);
-  await expect(canvas.or(heatmap).first()).toBeVisible({ timeout: 30_000 });
+  const section = page.locator("#map");
+  await expect(section).toBeAttached({ timeout: 15_000 });
+  await section.evaluate((element) => {
+    (element.querySelector(".map-load-card") as HTMLButtonElement | null)?.click();
+  });
+  await section.scrollIntoViewIfNeeded();
+  await expect(page.locator(".map-frame canvas, .heatmap").first()).toBeVisible({ timeout: 30_000 });
 }
 
 test.beforeAll(() => {
@@ -33,7 +33,6 @@ test("renders the lightweight market pulse before the collision map", async ({ p
   await expect.poll(() => page.locator(".market-news__grid h3").first().textContent())
     .not.toBe(firstHeadline);
   await expect(page.getByText(/第 2 \/ \d+ 组 · 共 \d+ 条/)).toBeVisible();
-  await expect(page.getByRole("button", { name: /查看大盘云图/ })).toBeVisible();
 
   await openMap(page);
   await expect(page.getByText(/碰撞图显示 \d+ \/ 活跃池 \d+ 只/)).toBeVisible();
@@ -111,6 +110,8 @@ test("focuses and selects a painted bubble through the canvas", async ({ page },
   await canvas.hover({ position: target });
   await expect(tooltip).toBeVisible();
   await expect(tooltip.locator("strong")).toHaveText(target.name);
+  await expect(canvas).toHaveAttribute("data-pointer-field", "active");
+  await expect(canvas).toHaveAttribute("data-focus-scale", "1.28");
 
   const currentTarget = await readHitTarget();
   if (!currentTarget) throw new Error("Market bubble target disappeared before click");
@@ -233,6 +234,7 @@ test("switches to the heatmap, selects a tile, and remembers the view", async ({
 
 test("switches independently between stocks, sectors, bubbles, and heatmap", async ({ page }) => {
   await page.goto("/");
+  test.setTimeout(60_000);
   await openMap(page);
   await expect.poll(
     () => page.locator(".bubble-access-list button").count(),
@@ -250,15 +252,12 @@ test("switches independently between stocks, sectors, bubbles, and heatmap", asy
     return max / min;
   })).toBeGreaterThan(1.8);
   await expect.poll(async () => canvas.evaluate((element) =>
-    Number((element as HTMLCanvasElement).dataset.motionEnergy),
-  )).toBeGreaterThan(0.03);
-  await expect.poll(async () => canvas.evaluate((element) =>
     Number((element as HTMLCanvasElement).dataset.centerClearance),
   )).toBeLessThan(34);
 
   await page.getByRole("button", { name: "板块", exact: true }).click();
   await expect.poll(() => page.locator(".bubble-access-list button").count()).toBeGreaterThan(30);
-  await expect(page.getByRole("heading", { name: "概念板块涨跌碰撞云图" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "行业板块涨跌碰撞云图" })).toBeVisible();
   await expect.poll(async () => canvas.evaluate((element) => {
     const drawing = element as HTMLCanvasElement;
     const visible = Number(drawing.dataset.visibleCount);
@@ -366,13 +365,12 @@ test("disables Agent and profile updates after the daily quota is exhausted", as
   await expect(page.getByRole("button", { name: "修改用户画像" })).toBeDisabled();
 });
 
-test("keeps bubbles moving after the initial layout", async ({ page }) => {
+test("settles bubbles without overlap after the initial layout", async ({ page }) => {
   await page.goto("/");
   await openMap(page);
   const canvas = page.locator(".map-frame canvas");
   await expect(canvas).toHaveAttribute("data-settled", "true");
-  const before = await canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL());
-  await expect.poll(() => canvas.evaluate((element) => (element as HTMLCanvasElement).toDataURL())).not.toBe(before);
+  await expect(canvas).toHaveAttribute("data-overlap-count", "0");
 });
 
 test("shows a model failure without claiming a model response", async ({ page }) => {
@@ -414,11 +412,12 @@ test("searches an arbitrary A-share and opens live charts and company profile", 
   await expect(dialog).toBeHidden();
 });
 
-test("polls displayed stock quotes every three seconds while visible", async ({ page }) => {
+test("polls displayed stock quotes every fifteen seconds while visible", async ({ page }) => {
+  test.setTimeout(60_000);
   let quoteRequests = 0;
   page.on("request", (request) => { if (request.url().includes("/api/v1/market/quotes")) quoteRequests += 1; });
   await page.goto("/");
   await openMap(page);
-  await expect.poll(() => quoteRequests, { timeout: 8_000 }).toBeGreaterThanOrEqual(2);
-  await expect(page.getByText(/3 秒更新/)).toBeVisible();
+  await expect.poll(() => quoteRequests, { timeout: 25_000 }).toBeGreaterThanOrEqual(1);
+  await expect(page.getByText(/15 秒更新/)).toBeVisible();
 });

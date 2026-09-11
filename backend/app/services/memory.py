@@ -71,6 +71,14 @@ class MemoryStore:
                 ON news_documents(published_at DESC)
             """)
             connection.execute("""
+                CREATE TABLE IF NOT EXISTS market_snapshots (
+                    snapshot_key VARCHAR(64) PRIMARY KEY,
+                    payload JSONB NOT NULL,
+                    observed_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+            """)
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS portfolios (
                     client_id VARCHAR(64) PRIMARY KEY,
                     payload JSONB NOT NULL,
@@ -266,6 +274,35 @@ class MemoryStore:
                 rows,
             )
 
+
+    def upsert_market_snapshot(
+        self, snapshot_key: str, payload: dict, observed_at: datetime
+    ) -> None:
+        with self._pool.connection() as connection:
+            connection.execute(
+                """INSERT INTO market_snapshots(snapshot_key, payload, observed_at, updated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT(snapshot_key) DO UPDATE SET payload=excluded.payload,
+                observed_at=excluded.observed_at, updated_at=excluded.updated_at""",
+                (snapshot_key, Jsonb(payload), observed_at, datetime.now(UTC)),
+            )
+
+    def get_market_snapshot(self, snapshot_key: str) -> dict | None:
+        with self._pool.connection() as connection:
+            row = connection.execute(
+                "SELECT payload FROM market_snapshots WHERE snapshot_key=%s",
+                (snapshot_key,),
+            ).fetchone()
+        return row["payload"] if row else None
+
+    def recent_news(self, limit: int = 36) -> list[MarketNewsItem]:
+        with self._pool.connection() as connection:
+            rows = connection.execute(
+                """SELECT news_id, headline, summary, source, published_at, url
+                FROM news_documents ORDER BY published_at DESC LIMIT %s""",
+                (limit,),
+            ).fetchall()
+        return [MarketNewsItem(**row) for row in rows]
 
 def _quota_record(client_id: str, usage_date: date, row) -> DailyQuotaStatus:
     agent_used = int(row["agent_queries"])

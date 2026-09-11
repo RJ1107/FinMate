@@ -57,6 +57,7 @@ function App() {
   const [liveError, setLiveError] = useState(false);
   const [activeSection, setActiveSection] = useState<"market" | "map" | "analysis" | "profile">("market");
   const [mapRequested, setMapRequested] = useState(false);
+  const hasMarketOverview = overview !== null;
   const [paperOpen, setPaperOpen] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfileData>(loadUserProfile);
   const [clock, setClock] = useState(() => new Date());
@@ -177,13 +178,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (mapRequested) return;
-    const requestAfterScroll = () => {
-      if (window.scrollY >= 180) setMapRequested(true);
-    };
-    window.addEventListener("scroll", requestAfterScroll, { passive: true });
-    return () => window.removeEventListener("scroll", requestAfterScroll);
-  }, [mapRequested]);
+    const section = document.getElementById("map");
+    if (!section) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) setMapRequested(true);
+    }, { rootMargin: "0px" });
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, [hasMarketOverview]);
 
   useEffect(() => {
     if (mapRequested && !overview?.sectors.length && !loading) void loadOverview();
@@ -203,7 +205,7 @@ function App() {
   );
 
   useEffect(() => {
-    if (!watchSymbols) return;
+    if (!watchSymbols || !mapRequested) return;
     let active = true;
     let timer: number | undefined;
     const refresh = async () => {
@@ -226,14 +228,14 @@ function App() {
           }
         } catch { if (active) setLiveError(true); }
       }
-      if (active) timer = window.setTimeout(refresh, 3000);
+      if (active) timer = window.setTimeout(refresh, 15_000);
     };
-    void refresh();
+    timer = window.setTimeout(refresh, 15_000);
     return () => { active = false; if (timer) window.clearTimeout(timer); };
-  }, [watchSymbols]);
+  }, [mapRequested, watchSymbols]);
 
   useEffect(() => {
-    if (entityMode !== "sectors") return;
+    if (!mapRequested || entityMode !== "sectors") return;
     let active = true;
     let timer: number | undefined;
     const refresh = async () => {
@@ -243,11 +245,11 @@ function App() {
           if (active) setOverview((current) => current ? { ...current, industry_sectors: sectors } : current);
         } catch { /* Keep the most recent industry values when the upstream pauses. */ }
       }
-      if (active) timer = window.setTimeout(refresh, 3000);
+      if (active) timer = window.setTimeout(refresh, 60_000);
     };
     void refresh();
     return () => { active = false; if (timer) window.clearTimeout(timer); };
-  }, [entityMode]);
+  }, [entityMode, mapRequested]);
 
   useEffect(() => {
     const value = query.trim();
@@ -385,7 +387,7 @@ function App() {
   const displayOverview = entityMode === "sectors" ? industryOverview : filteredOverview;
   const marketTitle = entityMode === "stocks"
     ? mapMode === "bubbles" ? "个股涨跌碰撞云图" : "个股行情云图"
-    : mapMode === "bubbles" ? "概念板块涨跌碰撞云图" : "概念板块行情云图";
+    : mapMode === "bubbles" ? "行业板块涨跌碰撞云图" : "行业板块行情云图";
 
   return (
     <div className="app-shell">
@@ -602,7 +604,7 @@ function App() {
                   )}
                 </div>
                 <div className="map-legend" aria-label="云图编码说明">
-                  <span className={liveError ? "live-feed live-feed--error" : "live-feed"}><i />{liveError ? "实时行情暂缓" : `3 秒更新${liveObservedAt ? ` · ${formatClock(liveObservedAt)}` : ""}`}</span>
+                  <span className={liveError ? "live-feed live-feed--error" : "live-feed"}><i />{liveError ? "实时行情暂缓" : `15 秒更新 · ${formatClock(liveObservedAt ?? overview.provenance.observed_at)}`}</span>
                   <span><i className="legend-dot legend-dot--size" />{mapMode === "bubbles"
                     ? "大小 · 涨跌幅绝对值"
                     : entityMode === "sectors" ? "面积 · 涨跌幅绝对值（平滑）" : "面积 · 成交活跃度（平滑）"}</span>

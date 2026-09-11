@@ -34,6 +34,7 @@ interface HeaderLayout {
   x: number;
   y: number;
   width: number;
+  height: number;
 }
 
 interface ZoneLayout {
@@ -124,6 +125,7 @@ export function MarketHeatmap({
           x: sector.x0,
           y: sector.y0 + zone.top,
           width: Math.max(0, sector.x1 - sector.x0),
+          height: Math.max(0, Math.min(23, (sector.y1 - sector.y0) * 0.32 - 3)),
         }));
         tree.leaves().forEach((node) => {
           if (!node.data.entity) return;
@@ -197,11 +199,11 @@ export function MarketHeatmap({
           {zone.label}<small>{zone.count} {zone.noun}</small>
         </div>
       ))}
-      {layout.headers.map((header) => (
+      {layout.headers.filter((header) => header.height >= 8).map((header) => (
         <div
           className="heatmap-sector"
           key={header.id}
-          style={{ left: header.x, top: header.y, width: header.width, height: 23 }}
+          style={{ left: header.x, top: header.y, width: header.width, height: header.height }}
           title={header.name}
         >
           {header.name}
@@ -256,6 +258,8 @@ function makeTree(
     .paddingInner(3)
     .paddingTop((node) => node.depth === 0
       ? paddingTop
-      : node.depth === 1 && node.children ? groupPaddingTop : 3)
+      : node.depth === 1 && node.children
+        ? Math.min(groupPaddingTop, Math.max(3, (node.y1 - node.y0) * 0.32))
+        : 3)
     .round(true)(root);
 }

@@ -1,3 +1,6 @@
+from datetime import UTC, datetime
+
+from app.domain.models import QuoteBatch, StockQuote
 from app.providers.base import MarketProviderError
 from app.providers.eastmoney import (
     EASTMONEY_FAST_NEWS_URL,
@@ -58,3 +61,22 @@ def test_news_falls_back_to_eastmoney_fast_feed(monkeypatch) -> None:
     assert items[0].headline == "A股市场收盘"
     assert items[0].source == "东方财富快讯"
     assert items[0].published_at.strftime("%Y-%m-%d %H:%M:%S") == "2026-09-10 15:01:00"
+
+def test_overview_uses_live_quote_batch_without_ranking_requests(monkeypatch) -> None:
+    provider = EastmoneyStockProvider()
+    observed_at = datetime.now(UTC)
+    monkeypatch.setattr(provider, "quotes", lambda symbols: QuoteBatch(
+        quotes=[StockQuote(
+            symbol="603986", name="兆易创新", sector="半导体", price=400.0,
+            change_percent=3.2, turnover_million_cny=8000.0,
+            market_cap_billion_cny=2800.0,
+        )],
+        source="tencent-live-quote",
+        observed_at=observed_at,
+    ))
+
+    overview = provider.get_market_overview()
+
+    assert overview.provenance.source == "tencent-live-quote"
+    assert overview.displayed_count == 1
+    assert overview.sectors[0].stocks[0].price == 400.0

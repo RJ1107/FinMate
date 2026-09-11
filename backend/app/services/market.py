@@ -1,8 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import Lock, Thread
 from zoneinfo import ZoneInfo
+
+from psycopg import Error as PsycopgError
 
 from app.domain.models import (
     DataMode,
@@ -49,8 +50,11 @@ class _PulseCore:
 
 
 class MarketService:
-    def __init__(self, provider_name: str = "auto", cache_ttl_seconds: int = 60) -> None:
+    def __init__(
+        self, provider_name: str = "auto", cache_ttl_seconds: int = 60, snapshot_store=None
+    ) -> None:
         self.provider_name = provider_name.lower()
+        self.snapshot_store = snapshot_store
         self.cache_ttl = timedelta(seconds=cache_ttl_seconds)
         self.demo_provider = DemoMarketDataProvider()
         self.stock_provider = EastmoneyStockProvider()
@@ -58,15 +62,35 @@ class MarketService:
         self._cache: _CacheEntry | None = None
         self._breadth_cache: _BreadthEntry | None = None
         self._pulse_core: _PulseCore | None = None
+        self._overview_refreshing = False
         self._breadth_refreshing = False
         self._breadth_failed = False
+        self._breadth_retry_at: datetime | None = None
         self._resource_cache: dict[str, tuple[datetime, object]] = {}
+        self._resource_locks: dict[str, Lock] = {}
         self._lock = Lock()
         self._overview_lock = Lock()
         self._pulse_lock = Lock()
 
     def get_overview(self, force_refresh: bool = False) -> MarketOverview:
         now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+        if not force_refresh and self.provider_name != "demo":
+            with self._lock:
+                cached = self._cache
+            if cached is not None:
+                if now >= cached.expires_at:
+                    self._schedule_overview_refresh()
+                return self._as_cached(cached.overview, now)
+            persisted = self._load_persisted_overview()
+            if persisted is not None:
+                persisted.provenance.mode = DataMode.CACHED
+                with self._lock:
+                    self._cache = _CacheEntry(
+                        overview=persisted, expires_at=now + self.cache_ttl
+                    )
+                self._schedule_overview_refresh()
+                return self._as_cached(persisted, now)
+
         with self._overview_lock:
             if not force_refresh and self._cache and now < self._cache.expires_at:
                 return self._as_cached(self._cache.overview, now)
@@ -86,27 +110,42 @@ class MarketService:
                             if sector.name not in {"A股", "沪市主板", "深市主板", "创业板", "科创板", "北交所"}
                         ]
                 except MarketProviderError as exc:
-                    overview = self.demo_provider.get_market_overview()
+                    overview = self._load_persisted_overview()
+                    if overview is None:
+                        overview = self.demo_provider.get_market_overview()
+                    else:
+                        overview.provenance.mode = DataMode.CACHED
                     overview.provenance.fallback_reason = str(exc)
-                    sector_loader = getattr(self.stock_provider, "market_sectors", None)
-                    if callable(sector_loader):
-                        try:
-                            overview.industry_sectors = sector_loader()
-                        except MarketProviderError:
-                            pass
 
             overview.industry_sectors = self._enrich_industry_sectors(
                 overview.industry_sectors, overview.sectors
             )
+            if overview.provenance.mode in {DataMode.LIVE, DataMode.DELAYED}:
+                self._persist_overview(overview)
 
+            completed_at = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
             with self._lock:
                 if overview.industry_sectors:
                     self._resource_cache["market-sectors"] = (
-                        now + timedelta(seconds=15),
+                        completed_at + self.cache_ttl,
                         overview.industry_sectors,
                     )
-                self._cache = _CacheEntry(overview=overview, expires_at=now + self.cache_ttl)
+                self._cache = _CacheEntry(overview=overview, expires_at=completed_at + self.cache_ttl)
             return overview
+
+    def _schedule_overview_refresh(self) -> None:
+        with self._lock:
+            if self._overview_refreshing:
+                return
+            self._overview_refreshing = True
+        Thread(target=self._refresh_overview, name="finmate-overview-refresh", daemon=True).start()
+
+    def _refresh_overview(self) -> None:
+        try:
+            self.get_overview(force_refresh=True)
+        finally:
+            with self._lock:
+                self._overview_refreshing = False
 
     def get_pulse(self, force_refresh: bool = False) -> MarketPulse:
         now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
@@ -122,21 +161,15 @@ class MarketService:
         with self._pulse_lock:
             core = self._pulse_core
             if force_refresh or core is None or now >= core.expires_at:
-                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="finmate-pulse") as executor:
-                    index_future = executor.submit(self.stock_provider.market_indices)
-                    limits_future = executor.submit(self.stock_provider.market_limit_counts)
-                    indices, turnover, observed_at = index_future.result()
-                    try:
-                        limit_up, limit_down, _ = limits_future.result()
-                    except MarketProviderError:
-                        limit_up = limit_down = None
+                indices, turnover, observed_at = self.stock_provider.market_indices()
+                completed_at = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
                 core = _PulseCore(
                     indices=indices,
                     turnover=turnover,
-                    limit_up=limit_up,
-                    limit_down=limit_down,
+                    limit_up=None,
+                    limit_down=None,
                     observed_at=observed_at,
-                    expires_at=now + timedelta(seconds=5),
+                    expires_at=completed_at + timedelta(seconds=30),
                 )
                 self._pulse_core = core
             indices = core.indices
@@ -147,10 +180,10 @@ class MarketService:
         with self._lock:
             breadth = self._breadth_cache
             needs_refresh = force_refresh or breadth is None or now >= breadth.expires_at
-            start_refresh = needs_refresh and not self._breadth_refreshing
+            retry_allowed = self._breadth_retry_at is None or now >= self._breadth_retry_at
+            start_refresh = needs_refresh and retry_allowed and not self._breadth_refreshing
             if start_refresh:
                 self._breadth_refreshing = True
-                self._breadth_failed = False
             failed = self._breadth_failed
         if start_refresh:
             Thread(target=self._refresh_breadth, name="finmate-breadth-refresh", daemon=True).start()
@@ -174,7 +207,7 @@ class MarketService:
             metrics=metrics,
             breadth_status=status,
             provenance=Provenance(
-                source="sina-index-and-a-share-breadth",
+                source="tencent-index-and-a-share-breadth",
                 mode=DataMode.LIVE,
                 observed_at=observed_at,
                 retrieved_at=now,
@@ -191,9 +224,11 @@ class MarketService:
                     expires_at=datetime.now(tz=ZoneInfo("Asia/Shanghai")) + self.cache_ttl,
                 )
                 self._breadth_failed = False
+                self._breadth_retry_at = None
         except MarketProviderError:
             with self._lock:
                 self._breadth_failed = True
+                self._breadth_retry_at = datetime.now(tz=ZoneInfo("Asia/Shanghai")) + timedelta(minutes=5)
         finally:
             with self._lock:
                 self._breadth_refreshing = False
@@ -350,13 +385,10 @@ class MarketService:
         })
 
     def get_industry_sectors(self) -> list[SectorSnapshot]:
-        return self._cached_resource(
-            "market-sectors",
-            15,
-            lambda: self._enrich_industry_sectors(
-                self.stock_provider.market_sectors(), self.get_overview().sectors
-            ),
-        )
+        overview = self.get_overview()
+        if not overview.industry_sectors:
+            raise MarketProviderError("No market sectors are available")
+        return overview.industry_sectors
 
     def get_realtime_overview(self) -> MarketOverview:
         """Overlay the curated market universe with current quotes for agent evidence."""
@@ -450,17 +482,46 @@ class MarketService:
             cached = self._resource_cache.get(key)
             if cached and now < cached[0]:
                 return cached[1]
-        try:
-            value = loader()
-        except MarketProviderError:
+            resource_lock = self._resource_locks.setdefault(key, Lock())
+        with resource_lock:
+            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
             with self._lock:
                 cached = self._resource_cache.get(key)
-            if cached:
-                return cached[1]
-            raise
-        with self._lock:
-            self._resource_cache[key] = (now + timedelta(seconds=ttl_seconds), value)
-        return value
+                if cached and now < cached[0]:
+                    return cached[1]
+            try:
+                value = loader()
+            except MarketProviderError:
+                with self._lock:
+                    cached = self._resource_cache.get(key)
+                if cached:
+                    return cached[1]
+                raise
+            completed_at = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            with self._lock:
+                self._resource_cache[key] = (completed_at + timedelta(seconds=ttl_seconds), value)
+            return value
+
+    def _persist_overview(self, overview: MarketOverview) -> None:
+        if self.snapshot_store is None:
+            return
+        try:
+            self.snapshot_store.upsert_market_snapshot(
+                "market-overview",
+                overview.model_dump(mode="json"),
+                overview.provenance.observed_at,
+            )
+        except (PsycopgError, RuntimeError):
+            return
+
+    def _load_persisted_overview(self) -> MarketOverview | None:
+        if self.snapshot_store is None:
+            return None
+        try:
+            payload = self.snapshot_store.get_market_snapshot("market-overview")
+            return MarketOverview.model_validate(payload) if payload else None
+        except (PsycopgError, RuntimeError, ValueError):
+            return None
 
     @staticmethod
     def _live_provenance(source: str, observed_at: datetime):

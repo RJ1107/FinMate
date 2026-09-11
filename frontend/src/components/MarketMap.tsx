@@ -60,7 +60,11 @@ const COLLISION_GAP = 3;
 const CROSSING_MS = 720;
 const LABEL_SAFE_WIDTH = 144;
 const LABEL_SAFE_HEIGHT = 48;
-const MOTION_ALPHA = 0.075;
+
+function canvasPixelRatio() {
+  const maximum = 1.5;
+  return Math.min(window.devicePixelRatio || 1, maximum);
+}
 
 export function MarketMap({
   overview,
@@ -77,6 +81,8 @@ export function MarketMap({
   const frameRef = useRef<number | null>(null);
   const hoveredRef = useRef<HoverState | null>(null);
   const drawRef = useRef<() => void>(() => undefined);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const interactionFrameRef = useRef<number | null>(null);
   const [hovered, setHovered] = useState<HoverState | null>(null);
 
   const entities = useMemo<VisualEntity[]>(() => {
@@ -84,7 +90,9 @@ export function MarketMap({
       return overview.sectors.map((sector) => ({
         id: "sector:" + sector.name,
         name: sector.name,
-        subtitle: (sector.constituent_count ?? sector.stocks.length) + " 只成分股 · ¥" +
+        subtitle: (sector.constituent_count != null
+          ? sector.constituent_count + " 只成分股"
+          : sector.stocks.length + " 只代表样本") + " · ¥" +
           (sector.turnover_billion_cny * 10).toFixed(1) + " 亿",
         change: sector.change_percent,
         turnover: sector.turnover_billion_cny * 1000,
@@ -109,6 +117,13 @@ export function MarketMap({
     ? selectedSymbol
     : selectedSector ? "sector:" + selectedSector : null;
 
+  const requestInteractionDraw = () => {
+    if (interactionFrameRef.current !== null) return;
+    interactionFrameRef.current = window.requestAnimationFrame(() => {
+      interactionFrameRef.current = null;
+      drawRef.current();
+    });
+  };
   useEffect(() => {
     const host = hostRef.current;
     const canvas = canvasRef.current;
@@ -123,16 +138,19 @@ export function MarketMap({
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     const draw = () => {
-      const ratio = window.devicePixelRatio || 1;
+      const ratio = canvasPixelRatio();
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
       context.clearRect(0, 0, width, height);
       drawField(context, width, height, theme);
       const hoveredId = hoveredRef.current?.entity.id;
-      for (const node of nodesRef.current) {
+      const displayNodes = interactiveLayout(nodesRef.current, pointerRef.current, hoveredId, width, height);
+      canvas.dataset.pointerField = pointerRef.current ? "active" : "inactive";
+      canvas.dataset.focusScale = hoveredId ? "1.28" : "1";
+      for (const node of displayNodes) {
         if (node.entity.id === hoveredId) continue;
         drawBubble(context, node, node.entity.id === selectedId, Boolean(hoveredId && node.entity.id !== hoveredId));
       }
-      const focus = nodesRef.current.find((node) => node.entity.id === hoveredId);
+      const focus = displayNodes.find((node) => node.entity.id === hoveredId);
       if (focus) drawBubble(context, focus, focus.entity.id === selectedId, false, true);
     };
     drawRef.current = draw;
@@ -151,7 +169,7 @@ export function MarketMap({
       height = Math.max(460, bounds.height);
       tick = 0;
       canvas.dataset.settled = "false";
-      const ratio = window.devicePixelRatio || 1;
+      const ratio = canvasPixelRatio();
       canvas.width = Math.round(width * ratio);
       canvas.height = Math.round(height * ratio);
       canvas.style.width = width + "px";
@@ -160,7 +178,6 @@ export function MarketMap({
       const previous = new Map(nodesRef.current.map((node) => [node.entity.id, node]));
       const upper = entities.filter((entity) => entity.change >= 0);
       const lower = entities.filter((entity) => entity.change < 0);
-      const densityCount = Math.max(upper.length, lower.length);
       const upperAnchors = makeAnchors(upper.length, width, height, true);
       const lowerAnchors = makeAnchors(lower.length, width, height, false);
       const upperIndex = new Map(upper.map((entity, index) => [entity.id, index]));
@@ -176,7 +193,13 @@ export function MarketMap({
         const changedSign = existing && (existing.entity.change >= 0) !== isUp;
         return {
           entity,
-          radius: bubbleRadius(entity.change, width, height, densityCount, entityMode),
+          radius: bubbleRadius(
+            entity.change,
+            width,
+            height,
+            isUp ? upper.length : lower.length,
+            entityMode,
+          ),
           anchorX: anchor.x,
           anchorY: anchor.y,
           x: existing?.x ?? anchor.x,
@@ -195,7 +218,7 @@ export function MarketMap({
       );
 
       constrainNodes(nodesRef.current, width, height, now);
-      separateNodes(nodesRef.current, width, height, now, 10);
+      separateNodes(nodesRef.current, width, height, now, 6);
       recordLayout(canvas, nodesRef.current, width, height, now);
 
       simulation.stop();
@@ -205,31 +228,25 @@ export function MarketMap({
         .force(
           "collide",
           forceCollide<BubbleNode>((node) => node.radius + COLLISION_GAP / 2)
-            .iterations(5)
+            .iterations(2)
             .strength(1),
         )
         .velocityDecay(0.34)
-        .alphaDecay(0.06)
-        .alphaTarget(reducedMotion.matches ? 0 : MOTION_ALPHA)
+        .alphaDecay(0.1)
+        .alphaTarget(0)
         .on("tick", () => {
           tick += 1;
           const time = performance.now();
-          if (tick > 70) canvas.dataset.settled = "true";
-          if (!reducedMotion.matches) {
-            nodesRef.current.forEach((node, index) => {
-              node.vx = (node.vx ?? 0) + Math.sin(tick * 0.032 + index * 1.91) * 0.07;
-              node.vy = (node.vy ?? 0) + Math.cos(tick * 0.027 + index * 1.37) * 0.052;
-            });
-          }
+          if (tick > 40) canvas.dataset.settled = "true";
           animateCrossings(nodesRef.current, time);
           constrainNodes(nodesRef.current, width, height, time);
-          separateNodes(nodesRef.current, width, height, time, 5);
+          separateNodes(nodesRef.current, width, height, time, 1);
           recordLayout(canvas, nodesRef.current, width, height, time);
           scheduleDraw();
         })
         .on("end", () => {
           const time = performance.now();
-          separateNodes(nodesRef.current, width, height, time, 10);
+          separateNodes(nodesRef.current, width, height, time, 6);
           recordLayout(canvas, nodesRef.current, width, height, time);
           canvas.dataset.settled = "true";
           draw();
@@ -239,8 +256,8 @@ export function MarketMap({
     };
 
     const updateMotion = () => {
-      if (document.hidden) simulation.stop();
-      else simulation.alphaTarget(reducedMotion.matches ? 0 : MOTION_ALPHA).alpha(0.28).restart();
+      if (document.hidden || reducedMotion.matches) simulation.stop();
+      else if (canvas.dataset.settled !== "true") simulation.alpha(0.28).restart();
     };
     document.addEventListener("visibilitychange", updateMotion);
     reducedMotion.addEventListener("change", updateMotion);
@@ -254,13 +271,15 @@ export function MarketMap({
       reducedMotion.removeEventListener("change", updateMotion);
       simulation.stop();
       if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+      if (interactionFrameRef.current !== null) window.cancelAnimationFrame(interactionFrameRef.current);
       frameRef.current = null;
+      interactionFrameRef.current = null;
+      pointerRef.current = null;
     };
   }, [entities, entityMode, selectedId, theme]);
 
   useEffect(() => {
     hoveredRef.current = hovered;
-    drawRef.current();
   }, [hovered]);
 
   const pointerPosition = (
@@ -274,7 +293,8 @@ export function MarketMap({
     [...nodesRef.current].reverse().find((node) => {
       const dx = x - (node.x ?? 0);
       const dy = y - (node.y ?? 0);
-      return dx * dx + dy * dy <= node.radius * node.radius;
+      const radius = node.radius * (node.entity.id === hoveredRef.current?.entity.id ? 1.28 : 1);
+      return dx * dx + dy * dy <= radius * radius;
     });
 
   const selectEntity = (entity: VisualEntity) => {
@@ -289,12 +309,23 @@ export function MarketMap({
         data-visible-count={entities.length}
         aria-label={entityMode === "stocks" ? "A 股个股涨跌碰撞云图" : "A 股概念板块涨跌碰撞云图"}
         onPointerMove={(event) => {
+          if (event.pointerType !== "mouse") return;
           const point = pointerPosition(event);
           const node = findNode(point.x, point.y);
+          const nextHovered = node ? { entity: node.entity, x: point.x, y: point.y } : null;
+          pointerRef.current = point;
+          hoveredRef.current = nextHovered;
           event.currentTarget.style.cursor = node ? "pointer" : "default";
-          setHovered(node ? { entity: node.entity, x: point.x, y: point.y } : null);
+          setHovered(nextHovered);
+          requestInteractionDraw();
         }}
-        onPointerLeave={() => setHovered(null)}
+        onPointerLeave={(event) => {
+          event.currentTarget.style.cursor = "default";
+          pointerRef.current = null;
+          hoveredRef.current = null;
+          setHovered(null);
+          requestInteractionDraw();
+        }}
         onClick={(event) => {
           const point = pointerPosition(event);
           const node = findNode(point.x, point.y);
@@ -377,7 +408,11 @@ function drawBubble(
   const colors = change >= 0 ? UP_COLORS : DOWN_COLORS;
   const intensity = Math.min(2, Math.floor(Math.abs(change) / 1.4));
   context.save();
-  context.globalAlpha = dimmed ? 0.24 : 1;
+  context.globalAlpha = dimmed ? 0.46 : 1;
+  if (hovered) {
+    context.shadowBlur = 18;
+    context.shadowColor = change >= 0 ? "rgba(240,120,130,.5)" : "rgba(76,206,161,.5)";
+  }
   context.beginPath();
   context.arc(x, y, node.radius + (hovered ? 2 : 0), 0, Math.PI * 2);
   context.fillStyle = colors[intensity];
@@ -405,6 +440,38 @@ function drawBubble(
   context.restore();
 }
 
+function interactiveLayout(
+  nodes: BubbleNode[],
+  pointer: { x: number; y: number } | null,
+  hoveredId: string | undefined,
+  width: number,
+  height: number,
+) {
+  if (!pointer) return nodes;
+  const visualNodes = nodes.map((node) => ({ ...node }));
+  const focus = visualNodes.find((node) => node.entity.id === hoveredId);
+  if (focus) focus.radius = Math.min(62, focus.radius * 1.28);
+  const fieldRadius = focus ? Math.max(96, focus.radius * 2.7) : 78;
+  for (const node of visualNodes) {
+    if (node === focus) continue;
+    let dx = (node.x ?? 0) - pointer.x;
+    let dy = (node.y ?? 0) - pointer.y;
+    let distance = Math.hypot(dx, dy);
+    if (distance >= fieldRadius) continue;
+    if (distance < 0.1) {
+      dx = node.entity.id.length % 2 ? 1 : -1;
+      dy = node.entity.id.length % 3 ? 1 : -1;
+      distance = Math.hypot(dx, dy);
+    }
+    const strength = Math.pow(1 - distance / fieldRadius, 2) * (focus ? 34 : 20);
+    node.x = (node.x ?? 0) + dx / distance * strength;
+    node.y = (node.y ?? 0) + dy / distance * strength;
+  }
+  const now = performance.now();
+  constrainNodes(visualNodes, width, height, now);
+  separateNodes(visualNodes, width, height, now, 2, hoveredId);
+  return visualNodes;
+}
 function shouldShowChange(node: BubbleNode) {
   return Boolean(node.entity.sector) || node.radius >= 18;
 }
@@ -446,10 +513,15 @@ function bubbleRadius(
   const normalizedMove = Math.pow(Math.min(Math.abs(change), 10) / 10, 0.55);
   const movementScale = 0.5 + normalizedMove * 1.25;
   const densityScale = mode === "sectors" ? 0.68 : width < 640 ? 0.68 : 0.55;
+  const sparseZone = zoneCount <= 32;
+  const minimumRadius =
+    mode === "sectors" ? 18 : width < 640 ? (sparseZone ? 13 : 10) : sparseZone ? 22 : 15;
+  const maximumRadius =
+    mode === "sectors" ? 54 : width < 640 ? (sparseZone ? 54 : 48) : sparseZone ? 64 : 48;
   return clamp(
     packingRadius * densityScale * movementScale,
-    mode === "sectors" ? 18 : width < 640 ? 11 : 15,
-    mode === "sectors" ? 54 : 48,
+    minimumRadius,
+    maximumRadius,
   );
 }
 
@@ -506,6 +578,7 @@ function separateNodes(
   height: number,
   now: number,
   iterations: number,
+  fixedId?: string,
 ) {
   for (let pass = 0; pass < iterations; pass += 1) {
     for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
@@ -522,13 +595,21 @@ function separateNodes(
           dy = ((leftIndex * 13 + rightIndex * 19) % 7) - 3 || -1;
           distance = Math.hypot(dx, dy);
         }
-        const push = (minimum - distance) / 2 + 0.05;
+        const overlap = minimum - distance + 0.1;
         const nx = dx / distance;
         const ny = dy / distance;
-        left.x = (left.x ?? 0) - nx * push;
-        left.y = (left.y ?? 0) - ny * push;
-        right.x = (right.x ?? 0) + nx * push;
-        right.y = (right.y ?? 0) + ny * push;
+        if (left.entity.id === fixedId) {
+          right.x = (right.x ?? 0) + nx * overlap;
+          right.y = (right.y ?? 0) + ny * overlap;
+        } else if (right.entity.id === fixedId) {
+          left.x = (left.x ?? 0) - nx * overlap;
+          left.y = (left.y ?? 0) - ny * overlap;
+        } else {
+          left.x = (left.x ?? 0) - nx * overlap / 2;
+          left.y = (left.y ?? 0) - ny * overlap / 2;
+          right.x = (right.x ?? 0) + nx * overlap / 2;
+          right.y = (right.y ?? 0) + ny * overlap / 2;
+        }
       }
     }
     constrainNodes(nodes, width, height, now);
